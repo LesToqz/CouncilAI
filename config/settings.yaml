@@ -1,0 +1,32 @@
+app:
+  name: "CouncilAI"
+  host: "127.0.0.1"
+  port: 7860
+
+browser:
+  mode: "existing_edge_cdp"
+  channel: "msedge"
+  cdp_url: "http://127.0.0.1:9222"
+  auto_launch_cdp: true
+  app_profile: "profiles/app_edge_profile"
+  open_missing_tabs: false
+  headless: false
+  slow_mo_ms: 100
+  timeout_ms: 120000
+
+profiles:
+  chatgpt: "profiles/chatgpt_edge_profile"
+  gemini: "profiles/gemini_edge_profile"
+  claude: "profiles/claude_edge_profile"
+
+debate:
+  default_iterations: 2
+  max_iterations: 5
+  similarity_stop_threshold: 0.90
+  min_response_chars: 100
+
+logging:
+  save_jsonl: true
+  save_sqlite: true
+  jsonl_dir: "data/debate_logs"
+  sqlite_path: "data/sqlite/debates.db"

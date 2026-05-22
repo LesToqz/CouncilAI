@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+profiles/
+data/debate_logs/
+data/sqlite/
+data/exports/
+md files/
+.pytest_cache/
+.DS_Store

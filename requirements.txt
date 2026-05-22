@@ -1,0 +1,16 @@
+playwright
+langgraph
+langchain-core
+pydantic
+pydantic-settings
+pyyaml
+python-dotenv
+gradio
+beautifulsoup4
+markdownify
+sentence-transformers
+scikit-learn
+numpy
+sqlalchemy
+rich
+pytest

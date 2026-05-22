@@ -1,0 +1,14 @@
+chatgpt:
+  name: "ChatGPT"
+  url: "https://chatgpt.com/"
+  role: "strategist and final synthesizer"
+
+gemini:
+  name: "Gemini"
+  url: "https://gemini.google.com/"
+  role: "researcher and broad-context analyst"
+
+claude:
+  name: "Claude"
+  url: "https://claude.ai/"
+  role: "critic, writer, and reasoning reviewer"
