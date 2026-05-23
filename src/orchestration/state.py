@@ -21,7 +21,7 @@ class DebateState(BaseModel):
     run_id: str = Field(default_factory=lambda: str(uuid4()))
     created_at: str = Field(default_factory=utc_now_iso)
     user_prompt: str
-    mode: Literal["silent", "observable"]
+    mode: Literal["normal", "debate"]
     max_iterations: int
     active_models: list[str]
     current_iteration: int = 0

@@ -133,7 +133,6 @@ class ClaudeAdapter(BaseChatAdapter):
         it to stabilise."""
 
         timeout_ms = int(self.settings.get("browser", {}).get("timeout_ms", 120000))
-        min_chars = int(self.settings.get("debate", {}).get("min_response_chars", 100))
         poll_interval = float(
             self.settings.get("browser", {}).get("response_poll_interval_seconds", 1.0)
         )
@@ -164,7 +163,7 @@ class ClaudeAdapter(BaseChatAdapter):
                 continue
 
             if saw_new and current_text and current_text != (previous_response or ""):
-                if current_text == last_text and len(current_text) >= min_chars:
+                if current_text == last_text and current_text.strip():
                     stable_count += 1
                 else:
                     stable_count = 0

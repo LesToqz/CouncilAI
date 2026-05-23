@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import html
+import re
 from typing import Any
 
 import gradio as gr
@@ -13,6 +15,11 @@ from src.utils.text_cleaner import clean_response_text
 
 
 MODEL_ORDER = ("chatgpt", "gemini", "claude")
+MODEL_ACCENTS = {
+    "chatgpt": "#f4f4f5",
+    "gemini": "#7aa2ff",
+    "claude": "#f59e66",
+}
 
 
 def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
@@ -30,8 +37,8 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
         use_chatgpt: bool,
         use_gemini: bool,
         use_claude: bool,
-    ) -> tuple[str, Any, str]:
-        return await run_debate(
+    ):
+        async for update in run_debate_stream(
             settings,
             prompt,
             mode,
@@ -39,7 +46,8 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             use_chatgpt,
             use_gemini,
             use_claude,
-        )
+        ):
+            yield update
 
     def toggle_options(is_open: bool) -> tuple[bool, Any, Any]:
         next_open = not bool(is_open)
@@ -78,11 +86,11 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                 label="Final Answer",
                 elem_classes=["final-answer-box"],
             )
-            observable_box = gr.Markdown(
+            observable_box = gr.HTML(
+                value="",
                 visible=False,
-                label="Observable Debate",
+                label="Mode Output",
                 elem_classes=["debate-trace-box"],
-                sanitize_html=False,
             )
 
         with gr.Column(elem_classes=["composer-shell"]):
@@ -106,14 +114,14 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                     with gr.Column(scale=5, elem_classes=["drawer-card"]):
                         gr.HTML('<p class="field-label">Mode</p>')
                         mode_radio = gr.Radio(
-                            choices=["Silent Final Mode", "Observable Debate Mode"],
-                            value="Silent Final Mode",
+                            choices=["Normal", "Debate"],
+                            value="Normal",
                             label="Mode",
                             show_label=False,
                             container=False,
                         )
                     with gr.Column(scale=7, elem_classes=["drawer-card"]):
-                        gr.HTML('<p class="field-label">Iterations</p>')
+                        gr.HTML('<p class="field-label">Debate iterations</p>')
                         iterations_slider = gr.Slider(
                             minimum=1,
                             maximum=max_iterations,
@@ -158,7 +166,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
         )
 
         mode_radio.change(
-            fn=lambda mode: gr.update(visible=mode == "Observable Debate Mode"),
+            fn=lambda mode: gr.update(visible=False),
             inputs=mode_radio,
             outputs=observable_box,
         )
@@ -228,15 +236,50 @@ async def run_debate(
     use_chatgpt: bool,
     use_gemini: bool,
     use_claude: bool,
-) -> tuple[str, Any, str]:
+) -> tuple[str, Any, Any]:
+    final_update = ("", gr.update(value="", visible=False), gr.update(value="", visible=False))
+    async for update in run_debate_stream(
+        settings,
+        prompt,
+        mode_label,
+        iterations,
+        use_chatgpt,
+        use_gemini,
+        use_claude,
+    ):
+        final_update = update
+    return final_update
+
+
+async def run_debate_stream(
+    settings: dict,
+    prompt: str,
+    mode_label: str,
+    iterations: float,
+    use_chatgpt: bool,
+    use_gemini: bool,
+    use_claude: bool,
+):
     prompt = (prompt or "").strip()
     active_models = _selected_models(use_chatgpt, use_gemini, use_claude)
-    mode = "observable" if mode_label == "Observable Debate Mode" else "silent"
+    mode = "debate" if mode_label == "Debate" else "normal"
 
     if not prompt:
-        return _message_panel("Prompt required", "Enter a prompt before running a debate."), gr.update(value="", visible=mode == "observable"), _welcome_markdown()
-    if len(active_models) < 2:
-        return _message_panel("Model selection", "Select at least two models."), gr.update(value="", visible=mode == "observable"), _welcome_markdown()
+        yield (
+            _message_panel("Prompt required", "Enter a prompt before running."),
+            gr.update(value="", visible=False),
+            gr.update(value=_welcome_markdown(), visible=True),
+        )
+        return
+
+    min_models = 2 if mode == "debate" else 1
+    if len(active_models) < min_models:
+        yield (
+            _message_panel("Model selection", f"Select at least {min_models} model{'' if min_models == 1 else 's'}."),
+            gr.update(value="", visible=False),
+            gr.update(value=_welcome_markdown(), visible=True),
+        )
+        return
 
     max_iterations = int(settings.get("debate", {}).get("max_iterations", 5))
     iteration_count = max(1, min(int(iterations), max_iterations))
@@ -248,19 +291,79 @@ async def run_debate(
         active_models=active_models,
     )
 
-    graph = DebateGraph(settings)
-    try:
-        final_state = await graph.ainvoke(state)
-    except Exception as exc:  # noqa: BLE001 - UI must show unexpected orchestration failures.
-        return (
-            _message_panel("Debate failed", str(exc)),
-            gr.update(value="", visible=mode == "observable"),
-            "",
+    progress_messages = ["Normal run queued" if mode == "normal" else "Debate queued"]
+    progress_queue: asyncio.Queue[tuple[str, DebateState | None]] = asyncio.Queue()
+
+    async def on_progress(message: str, progress_state: DebateState | None = None) -> None:
+        progress_messages.append(message)
+        del progress_messages[:-14]
+        progress_queue.put_nowait((message, progress_state))
+
+    if mode == "debate":
+        yield (
+            _live_status_markdown(active_models, progress_messages, mode),
+            gr.update(value=_observable_board_html(settings, state, progress_messages, active_models), visible=True),
+            gr.update(value="", visible=False),
+        )
+    else:
+        yield (
+            _live_status_markdown(active_models, progress_messages, mode),
+            gr.update(value=_normal_board_html(settings, state, active_models), visible=True),
+            gr.update(value="", visible=False),
         )
 
+    graph = DebateGraph(settings, progress_callback=on_progress)
+    latest_state = state
+    task = asyncio.create_task(graph.ainvoke(state))
+    try:
+        while not task.done():
+            try:
+                _, progress_state = await asyncio.wait_for(progress_queue.get(), timeout=0.35)
+            except asyncio.TimeoutError:
+                continue
+
+            if progress_state is not None:
+                latest_state = progress_state
+
+            if mode == "debate":
+                yield (
+                    _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
+                    gr.update(
+                        value=_observable_board_html(settings, latest_state, progress_messages, active_models),
+                        visible=True,
+                    ),
+                    gr.update(value="", visible=False),
+                )
+            else:
+                yield (
+                    _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
+                    gr.update(value=_normal_board_html(settings, latest_state, active_models), visible=True),
+                    gr.update(value="", visible=False),
+                )
+
+        final_state = await task
+    except Exception as exc:  # noqa: BLE001 - UI must show unexpected orchestration failures.
+        yield (
+            _message_panel("Run failed", str(exc)),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+        )
+        return
+
     status = _status_markdown(final_state)
-    observable = _observable_markdown(final_state) if mode == "observable" else ""
-    return status, gr.update(value=observable, visible=mode == "observable"), _format_final_answer(final_state.final_answer)
+    if mode == "normal":
+        yield (
+            status,
+            gr.update(value=_normal_board_html(settings, final_state, active_models), visible=True),
+            gr.update(value="", visible=False),
+        )
+        return
+
+    yield (
+        status,
+        gr.update(value=_observable_board_html(settings, final_state, progress_messages, active_models), visible=True),
+        gr.update(value=_format_final_answer(final_state.final_answer), visible=True),
+    )
 
 
 def _selected_models(use_chatgpt: bool, use_gemini: bool, use_claude: bool) -> list[str]:
@@ -290,17 +393,274 @@ def _status_markdown(state: DebateState) -> str:
     return "\n".join(lines)
 
 
-def _observable_markdown(state: DebateState) -> str:
-    sections = ["## Debate Trace"]
-    for turn in state.turns:
-        title = f"{turn.model.upper()} | iteration {turn.iteration} | {turn.phase.replace('_', ' ')}"
-        sections.append(f"<details><summary>{html.escape(title)}</summary>\n\n")
-        if turn.error:
-            sections.append(f"**Error:** {html.escape(turn.error)}\n\n")
-        if turn.response:
-            sections.append(turn.response)
-        sections.append("\n\n</details>")
-    return "\n".join(sections)
+def _live_status_markdown(active_models: list[str], messages: list[str], mode: str) -> str:
+    active = ", ".join(model.upper() for model in active_models) or "None"
+    latest = html.escape(messages[-1] if messages else "Waiting")
+    mode_title = "Debate" if mode == "debate" else "Normal"
+    return (
+        '<div class="status-grid">'
+        f'{_stat_card("Status", latest)}'
+        f'{_stat_card("Active Models", active)}'
+        f'{_stat_card("Events", str(len(messages)))}'
+        f'{_stat_card("Mode", mode_title)}'
+        "</div>"
+    )
+
+
+def _normal_board_html(settings: dict, state: DebateState, selected_models: list[str]) -> str:
+    columns = "\n".join(
+        _model_column_html(
+            settings,
+            state,
+            model_key,
+            progress_messages=[],
+            selected_models=selected_models,
+            output_only=True,
+        )
+        for model_key in MODEL_ORDER
+    )
+    return (
+        '<section class="debate-board normal-board">'
+        f'<div class="debate-columns">{columns}</div>'
+        "</section>"
+    )
+
+
+def _observable_board_html(
+    settings: dict,
+    state: DebateState,
+    progress_messages: list[str],
+    selected_models: list[str],
+) -> str:
+    columns = "\n".join(
+        _model_column_html(settings, state, model_key, progress_messages, selected_models)
+        for model_key in MODEL_ORDER
+    )
+    events = "\n".join(
+        f'<li><span>{html.escape(message)}</span></li>'
+        for message in progress_messages[-8:]
+    )
+    return (
+        '<section class="debate-board">'
+        '<div class="debate-board-header">'
+        '<div><p class="eyebrow">Debate</p><h2>Live council board</h2></div>'
+        '<div class="live-indicator"><span></span>Live</div>'
+        "</div>"
+        f'<ul class="debate-event-strip">{events}</ul>'
+        f'<div class="debate-columns">{columns}</div>'
+        "</section>"
+    )
+
+
+def _model_column_html(
+    settings: dict,
+    state: DebateState,
+    model_key: str,
+    progress_messages: list[str],
+    selected_models: list[str],
+    output_only: bool = False,
+) -> str:
+    label = _model_label(settings, model_key)
+    accent = MODEL_ACCENTS.get(model_key, "#f4f4f5")
+    turns = [turn for turn in state.turns if turn.model == model_key]
+    status_label, status_class = _model_status(label, model_key, state, turns, progress_messages, selected_models)
+    visible_turns = [turn for turn in turns if turn.phase == "initial_answer"] if output_only else [
+        turn for turn in turns if turn.phase != "initialize"
+    ]
+    cards = "\n".join(_turn_card_html(turn, output_only=output_only) for turn in visible_turns)
+    if not cards:
+        cards = (
+            '<div class="empty-turn">'
+            "<strong>Waiting for output</strong>"
+            f"<p>{'This model output will appear here.' if output_only else 'This model will show its answer, critique, refinement, and synthesis attempts here.'}</p>"
+            "</div>"
+        )
+
+    return (
+        f'<article class="debate-column {status_class}" style="--model-accent: {accent};">'
+        '<div class="debate-model-header">'
+        f'<div class="model-orb">{html.escape(label[:1])}</div>'
+        '<div>'
+        f'<h3>{html.escape(label)}</h3>'
+        f'<p>{html.escape(_model_role(settings, model_key))}</p>'
+        "</div>"
+        f'<span class="model-status">{html.escape(status_label)}</span>'
+        "</div>"
+        '<div class="debate-column-body">'
+        f"{cards}"
+        "</div>"
+        "</article>"
+    )
+
+
+def _turn_card_html(turn, output_only: bool = False) -> str:
+    phase = "Output" if output_only else _phase_label(turn.phase)
+    iteration = "" if output_only else (
+        "setup" if turn.iteration == 0 and turn.phase == "initialize" else f"iteration {turn.iteration}"
+    )
+    if turn.error:
+        body = f'<div class="turn-error">{html.escape(turn.error)}</div>'
+    elif turn.response:
+        body = _markdown_fragment_to_html(turn.response)
+    else:
+        body = '<p class="muted-copy">No output captured.</p>'
+
+    iteration_html = f'<span>{html.escape(iteration)}</span>' if iteration else ""
+    return (
+        '<section class="turn-card">'
+        '<div class="turn-meta">'
+        f'<span>{html.escape(phase)}</span>'
+        f"{iteration_html}"
+        "</div>"
+        f'<div class="turn-content">{body}</div>'
+        "</section>"
+    )
+
+
+def _model_status(
+    label: str,
+    model_key: str,
+    state: DebateState,
+    turns: list,
+    progress_messages: list[str],
+    selected_models: list[str],
+) -> tuple[str, str]:
+    if model_key not in selected_models:
+        return "Not selected", "is-muted"
+
+    latest_model_event = next(
+        (message for message in reversed(progress_messages) if message.startswith(f"{label}:")),
+        "",
+    )
+    if "failed" in latest_model_event:
+        return "Needs attention", "has-error"
+    if "started" in latest_model_event or "checking" in latest_model_event:
+        return "Working", "is-active"
+    if "complete" in latest_model_event:
+        return "Updated", "is-complete"
+    if model_key in state.active_models:
+        return "Connected", "is-complete" if turns else "is-active"
+    if turns and any(turn.error for turn in turns):
+        return "Error", "has-error"
+    return "Waiting", "is-muted"
+
+
+def _phase_label(phase: str) -> str:
+    labels = {
+        "initial_answer": "Initial answer",
+        "critique": "Critique",
+        "refinement": "Refinement",
+        "final_synthesis": "Final synthesis",
+        "initialize": "Connection",
+    }
+    return labels.get(phase, phase.replace("_", " ").title())
+
+
+def _model_label(settings: dict, model_key: str) -> str:
+    return settings.get("model_sites", {}).get(model_key, {}).get("name", model_key.title())
+
+
+def _model_role(settings: dict, model_key: str) -> str:
+    return settings.get("model_sites", {}).get(model_key, {}).get("role", "council participant")
+
+
+def _markdown_fragment_to_html(text: str) -> str:
+    lines = clean_response_text(text).splitlines()
+    parts: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            index += 1
+            continue
+
+        if line.startswith("```"):
+            code_lines = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            index += 1
+            parts.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            continue
+
+        if _is_table_start(lines, index):
+            table_lines = []
+            while index < len(lines) and "|" in lines[index]:
+                table_lines.append(lines[index])
+                index += 1
+            parts.append(_markdown_table_to_html(table_lines))
+            continue
+
+        if line.startswith("#"):
+            depth = min(len(line) - len(line.lstrip("#")), 4)
+            content = line[depth:].strip()
+            tag = "h4" if depth >= 3 else "h3"
+            parts.append(f"<{tag}>{_inline_markdown(content)}</{tag}>")
+            index += 1
+            continue
+
+        if _is_bullet(line):
+            items = []
+            while index < len(lines) and _is_bullet(lines[index].strip()):
+                items.append(lines[index].strip()[2:].strip())
+                index += 1
+            parts.append("<ul>" + "".join(f"<li>{_inline_markdown(item)}</li>" for item in items) + "</ul>")
+            continue
+
+        paragraph = [line]
+        index += 1
+        while index < len(lines):
+            candidate = lines[index].strip()
+            if not candidate or candidate.startswith("#") or _is_bullet(candidate) or _is_table_start(lines, index):
+                break
+            paragraph.append(candidate)
+            index += 1
+        parts.append(f"<p>{_inline_markdown(' '.join(paragraph))}</p>")
+
+    return "\n".join(parts) if parts else '<p class="muted-copy">No response text captured.</p>'
+
+
+def _inline_markdown(text: str) -> str:
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    return escaped
+
+
+def _is_bullet(line: str) -> bool:
+    return line.startswith("- ") or line.startswith("* ") or line.startswith("• ")
+
+
+def _is_table_start(lines: list[str], index: int) -> bool:
+    if index + 1 >= len(lines):
+        return False
+    current = lines[index].strip()
+    next_line = lines[index + 1].strip()
+    return "|" in current and "|" in next_line and set(next_line.replace("|", "").replace(":", "").strip()) <= {"-", " "}
+
+
+def _markdown_table_to_html(table_lines: list[str]) -> str:
+    rows = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in table_lines
+        if line.strip()
+    ]
+    if len(rows) < 2:
+        return "<p>" + _inline_markdown(" ".join(table_lines)) + "</p>"
+
+    header = rows[0]
+    body_rows = rows[2:] if _is_delimiter_row(rows[1]) else rows[1:]
+    header_html = "".join(f"<th>{_inline_markdown(cell)}</th>" for cell in header)
+    body_html = "".join(
+        "<tr>" + "".join(f"<td>{_inline_markdown(cell)}</td>" for cell in row) + "</tr>"
+        for row in body_rows
+    )
+    return f"<table><thead><tr>{header_html}</tr></thead><tbody>{body_html}</tbody></table>"
+
+
+def _is_delimiter_row(row: list[str]) -> bool:
+    return all(set(cell.replace(":", "").strip()) <= {"-"} for cell in row)
 
 
 def _format_final_answer(answer: str | None) -> str:
@@ -516,9 +876,10 @@ footer { display: none !important; visibility: hidden !important; }
     padding: 0 0 20px !important;
 }
 .debate-trace-box {
-    max-width: 960px;
+    width: min(100%, 1540px) !important;
+    max-width: none;
     margin: 22px auto 0 !important;
-    padding: 20px 0 0 !important;
+    padding: 8px 0 0 !important;
     border-top: 1px solid var(--cai-line) !important;
 }
 .final-answer-box h1,
@@ -647,6 +1008,250 @@ details summary {
 }
 details > *:not(summary) {
     padding: 0 14px 14px;
+}
+
+.debate-board {
+    width: 100%;
+    color: var(--cai-text);
+}
+.debate-board-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 0 12px;
+}
+.debate-board-header h2 {
+    color: var(--cai-text) !important;
+    font-size: 22px !important;
+    line-height: 1.25 !important;
+    margin: 0 !important;
+}
+.live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #d4d4d4;
+    border: 1px solid var(--cai-line);
+    border-radius: 999px;
+    padding: 7px 10px;
+    font-size: 12px;
+    font-weight: 650;
+}
+.live-indicator span {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #22c55e;
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.12);
+}
+.debate-event-strip {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 12px !important;
+    padding: 0 0 2px !important;
+    overflow-x: auto;
+    list-style: none;
+}
+.debate-event-strip li {
+    flex: 0 0 auto;
+    max-width: 260px;
+    padding: 7px 10px;
+    color: #d8d8d8 !important;
+    background: #151515;
+    border: 1px solid #2d2d2d;
+    border-radius: 999px;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.debate-columns {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(330px, 1fr));
+    gap: 12px;
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 8px;
+}
+.debate-column {
+    min-width: 330px;
+    background: #141414;
+    border: 1px solid #2b2b2b;
+    border-top: 2px solid var(--model-accent);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+}
+.debate-column.is-muted {
+    opacity: 0.62;
+}
+.debate-column.is-active {
+    border-color: #3b3b3b;
+    box-shadow: 0 18px 50px rgba(255, 255, 255, 0.04);
+}
+.debate-column.has-error {
+    border-color: #7c2d12;
+    border-top-color: #fb923c;
+}
+.debate-model-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 14px;
+    background: #1b1b1b;
+    border-bottom: 1px solid #2b2b2b;
+}
+.model-orb {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    color: #111111;
+    background: var(--model-accent);
+    border-radius: 999px;
+    font-weight: 800;
+}
+.debate-model-header h3 {
+    color: var(--cai-text) !important;
+    font-size: 15px !important;
+    line-height: 1.25 !important;
+    margin: 0 !important;
+}
+.debate-model-header p {
+    color: var(--cai-muted) !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+    margin: 2px 0 0 !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.model-status {
+    align-self: start;
+    color: #d4d4d4;
+    background: #242424;
+    border: 1px solid #383838;
+    border-radius: 999px;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.debate-column-body {
+    height: min(62vh, 680px);
+    overflow-y: auto;
+    padding: 12px;
+    scrollbar-color: #444444 #151515;
+}
+.turn-card {
+    background: #1d1d1d;
+    border: 1px solid #303030;
+    border-radius: 13px;
+    margin: 0 0 12px;
+    overflow: hidden;
+}
+.turn-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 11px;
+    color: #d9d9d9;
+    background: #252525;
+    border-bottom: 1px solid #333333;
+    font-size: 12px;
+    font-weight: 750;
+}
+.turn-meta span:last-child {
+    color: var(--cai-muted);
+    font-weight: 600;
+}
+.turn-content {
+    padding: 11px;
+}
+.turn-content h3,
+.turn-content h4 {
+    color: var(--cai-text) !important;
+    font-size: 15px !important;
+    line-height: 1.35 !important;
+    margin: 12px 0 8px !important;
+}
+.turn-content p,
+.turn-content li {
+    color: #e5e5e5 !important;
+    font-size: 14px !important;
+    line-height: 1.58 !important;
+}
+.turn-content p {
+    margin: 0 0 10px !important;
+}
+.turn-content ul,
+.turn-content ol {
+    margin: 6px 0 12px 20px !important;
+    padding: 0 !important;
+}
+.turn-content table {
+    width: 100% !important;
+    margin: 10px 0 12px !important;
+    border-collapse: collapse !important;
+    font-size: 12px !important;
+}
+.turn-content th,
+.turn-content td {
+    padding: 8px !important;
+    border-bottom: 1px solid #353535 !important;
+    text-align: left !important;
+    vertical-align: top !important;
+}
+.turn-content th {
+    color: #f4f4f5 !important;
+    background: #262626;
+}
+.turn-content code {
+    color: #f5f5f5;
+    background: #111111;
+    border: 1px solid #333333;
+    border-radius: 5px;
+    padding: 1px 5px;
+}
+.turn-content pre {
+    white-space: pre-wrap;
+    background: #111111 !important;
+    border: 1px solid #333333 !important;
+    border-radius: 9px !important;
+    padding: 10px !important;
+}
+.turn-error {
+    color: var(--cai-warn-text);
+    background: var(--cai-warn-bg);
+    border: 1px solid var(--cai-warn-line);
+    border-radius: 9px;
+    padding: 9px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+}
+.empty-turn {
+    padding: 16px;
+    color: #d6d6d6;
+    background: #1d1d1d;
+    border: 1px dashed #3a3a3a;
+    border-radius: 13px;
+}
+.empty-turn strong {
+    display: block;
+    color: var(--cai-text);
+    font-size: 14px;
+    margin-bottom: 6px;
+}
+.empty-turn p,
+.muted-copy {
+    color: var(--cai-muted) !important;
+    font-size: 13px !important;
+    line-height: 1.5 !important;
+    margin: 0 !important;
 }
 
 .composer-shell {

@@ -6,7 +6,7 @@ from src.browser.base_chat_adapter import BaseChatAdapter, EmptyResponseError
 
 
 class FakeAdapter(BaseChatAdapter):
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[str], min_response_chars: int = 2) -> None:
         super().__init__(
             model_key="fake",
             site={"url": "https://example.test"},
@@ -17,7 +17,7 @@ class FakeAdapter(BaseChatAdapter):
                     "response_poll_interval_seconds": 0.001,
                     "response_stable_polls": 2,
                 },
-                "debate": {"min_response_chars": 2},
+                "debate": {"min_response_chars": min_response_chars},
             },
         )
         self.responses = responses
@@ -41,6 +41,12 @@ def test_wait_for_response_requires_text_to_change() -> None:
 
 def test_wait_for_response_accepts_new_stable_text() -> None:
     adapter = FakeAdapter(["old response", "new response", "new response", "new response"])
+
+    asyncio.run(adapter.wait_for_response_complete(previous_response="old response"))
+
+
+def test_wait_for_response_accepts_short_stable_text() -> None:
+    adapter = FakeAdapter(["old response", "OK", "OK", "OK", "OK"], min_response_chars=100)
 
     asyncio.run(adapter.wait_for_response_complete(previous_response="old response"))
 

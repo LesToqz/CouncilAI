@@ -70,6 +70,12 @@ class DebateGraph:
         return builder.compile()
 
     async def ainvoke(self, initial_state: DebateState) -> DebateState:
+        if initial_state.mode == "normal":
+            state = await self.runner.initialize_browser_sessions(initial_state)
+            state = await self.runner.initial_answer_round(state)
+            state = await self.runner.log_result(state)
+            return state
+
         if self.compiled_graph is not None:
             result = await self.compiled_graph.ainvoke(dump_state(initial_state))
             return coerce_state(result)

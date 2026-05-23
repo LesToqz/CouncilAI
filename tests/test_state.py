@@ -4,8 +4,8 @@ from src.orchestration.state import DebateState
 
 
 def test_state_defaults_are_isolated() -> None:
-    first = DebateState(user_prompt="A", mode="silent", max_iterations=1, active_models=["chatgpt", "claude"])
-    second = DebateState(user_prompt="B", mode="observable", max_iterations=2, active_models=["gemini", "claude"])
+    first = DebateState(user_prompt="A", mode="normal", max_iterations=1, active_models=["chatgpt", "claude"])
+    second = DebateState(user_prompt="B", mode="debate", max_iterations=2, active_models=["gemini", "claude"])
 
     first.initial_answers["chatgpt"] = "answer"
     first.errors.append("warning")
@@ -15,7 +15,7 @@ def test_state_defaults_are_isolated() -> None:
 
 
 def test_record_turn_adds_error_to_state() -> None:
-    state = DebateState(user_prompt="A", mode="silent", max_iterations=1, active_models=["chatgpt", "claude"])
+    state = DebateState(user_prompt="A", mode="normal", max_iterations=1, active_models=["chatgpt", "claude"])
 
     state.record_turn("chatgpt", 1, "critique", "prompt", "", "timeout")
 

@@ -13,9 +13,9 @@ Website UIs may change and break automation. Use responsibly and respect each se
 - Runs a local Gradio app at `http://127.0.0.1:7860`.
 - Uses Microsoft Edge through Playwright.
 - Attaches to AI tabs you already opened in the same Edge window.
-- Supports Silent Final Mode and Observable Debate Mode.
-- Saves complete debate logs to JSONL and SQLite.
-- Continues when one model fails, as long as at least two models remain usable.
+- Supports Normal mode and Debate mode.
+- Saves complete run logs to JSONL and SQLite.
+- Continues when one model fails, as long as enough selected models remain usable.
 
 ## What It Does Not Do
 
@@ -62,18 +62,18 @@ Use those tabs normally and log in manually if needed. CouncilAI does not open A
 
 Remote debugging lets local programs control that Edge instance. Use it only on your own machine and close that Edge window when you are done.
 
-## Running A Debate
+## Running CouncilAI
 
 1. Enter a prompt.
-2. Choose Silent Final Mode or Observable Debate Mode.
-3. Select 1 to 5 debate iterations.
-4. Enable at least two model checkboxes.
+2. Choose Normal or Debate.
+3. Select 1 to 5 debate iterations for Debate mode.
+4. Enable the model checkboxes you want to use.
 5. Optionally click **Check Existing AI Tabs**.
-6. Click **Run Debate**.
+6. Click **Execute**.
 
-Silent Final Mode shows progress and the final synthesized answer only. Full internal logs are still saved.
+Normal mode sends the prompt once to the selected AI tabs and shows their initial outputs side by side. It does not run critique, refinement, or final synthesis.
 
-Observable Debate Mode shows initial answers, critiques, refinements, errors, and final synthesis.
+Debate mode shows the live side-by-side council board with initial answers, critiques, refinements, errors, and final synthesis.
 
 ## Logs
 

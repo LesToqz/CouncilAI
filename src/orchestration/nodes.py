@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
+import inspect
 from typing import Any
 
 from src.browser.base_chat_adapter import BaseChatAdapter
@@ -15,7 +17,7 @@ from src.storage.sqlite_store import SQLiteStore
 
 
 AdapterClass = type[BaseChatAdapter]
-ProgressCallback = Callable[[str], Awaitable[None] | None]
+ProgressCallback = Callable[..., Awaitable[None] | None]
 
 
 ADAPTERS: dict[str, AdapterClass] = {
@@ -41,6 +43,8 @@ def dump_state(state: DebateState) -> dict[str, Any]:
 
 def should_continue(state: DebateState | dict[str, Any]) -> str:
     debate_state = coerce_state(state)
+    if debate_state.mode == "normal":
+        return "finish"
     if debate_state.final_answer:
         return "finish"
     if len(debate_state.active_models) < 2:
@@ -65,13 +69,14 @@ class DebateNodeRunner:
         debate_state = coerce_state(state)
         browser_mode = self.settings.get("browser", {}).get("mode", "existing_edge_cdp")
         if browser_mode == "existing_edge_cdp":
-            await self._progress("Attaching to existing Edge AI tabs")
+            await self._progress("Attaching to existing Edge AI tabs", debate_state)
         else:
-            await self._progress("Opening Edge browser sessions")
+            await self._progress("Opening Edge browser sessions", debate_state)
 
         working_models: list[str] = []
         for model_key in list(debate_state.active_models):
             try:
+                await self._progress(f"{self._model_label(model_key)}: checking tab", debate_state)
                 site = self.sites[model_key]
                 page = None
                 if browser_mode == "existing_edge_cdp":
@@ -84,6 +89,7 @@ class DebateNodeRunner:
                 await adapter.open()
                 self.adapters[model_key] = adapter
                 working_models.append(model_key)
+                await self._progress(f"{self._model_label(model_key)}: connected", debate_state)
             except Exception as exc:  # noqa: BLE001 - convert browser failures into state errors.
                 debate_state.record_turn(
                     model=model_key,
@@ -93,11 +99,14 @@ class DebateNodeRunner:
                     response="",
                     error=str(exc),
                 )
+                await self._progress(f"{self._model_label(model_key)}: connection failed", debate_state)
 
         debate_state.active_models = working_models
-        if len(debate_state.active_models) < 2:
+        min_models = 1 if debate_state.mode == "normal" else 2
+        if len(debate_state.active_models) < min_models:
             debate_state.final_answer = (
-                "CouncilAI needs at least two working AI tabs. "
+                f"CouncilAI needs at least {min_models} working AI tab"
+                f"{'' if min_models == 1 else 's'}. "
                 "Open ChatGPT, Gemini, and Claude in the Edge instance started with "
                 "--remote-debugging-port=9222, then retry."
             )
@@ -108,26 +117,37 @@ class DebateNodeRunner:
         if debate_state.final_answer:
             return debate_state
 
-        await self._progress("Collecting initial answers")
-        working_models: list[str] = []
-        for model_key in list(debate_state.active_models):
+        await self._progress("Collecting initial answers", debate_state)
+        prompt_by_model: dict[str, str] = {}
+        for model_key in debate_state.active_models:
             role = self.sites[model_key].get("role", "")
-            prompt = self.prompt_loader.render(
+            prompt_by_model[model_key] = self.prompt_loader.render(
                 "initial_answer",
                 {
                     "USER_PROMPT": debate_state.user_prompt,
                     "MODEL_ROLE": role,
                 },
             )
-            response = await self._ask_model(debate_state, model_key, 0, "initial_answer", prompt)
+
+        response_pairs = await asyncio.gather(
+            *[
+                self._ask_model(debate_state, model_key, 0, "initial_answer", prompt)
+                for model_key, prompt in prompt_by_model.items()
+            ]
+        )
+
+        working_models: list[str] = []
+        for model_key, response in zip(prompt_by_model.keys(), response_pairs, strict=False):
             if response:
                 debate_state.initial_answers[model_key] = response
                 working_models.append(model_key)
 
         debate_state.active_models = working_models
-        if len(debate_state.active_models) < 2:
+        min_models = 1 if debate_state.mode == "normal" else 2
+        if len(debate_state.active_models) < min_models:
             debate_state.final_answer = (
-                "Fewer than two selected models returned an initial answer. "
+                f"Fewer than {min_models} selected model"
+                f"{'' if min_models == 1 else 's'} returned an initial answer. "
                 "Check login/session status and selector errors, then retry."
             )
         return debate_state
@@ -138,7 +158,7 @@ class DebateNodeRunner:
             return debate_state
 
         debate_state.current_iteration += 1
-        await self._progress(f"Running critique round {debate_state.current_iteration}")
+        await self._progress(f"Running critique round {debate_state.current_iteration}", debate_state)
         working_models: list[str] = []
 
         for model_key in list(debate_state.active_models):
@@ -174,7 +194,7 @@ class DebateNodeRunner:
         if debate_state.final_answer or len(debate_state.active_models) < 2:
             return debate_state
 
-        await self._progress(f"Running refinement round {debate_state.current_iteration}")
+        await self._progress(f"Running refinement round {debate_state.current_iteration}", debate_state)
         working_models: list[str] = []
 
         for model_key in list(debate_state.active_models):
@@ -215,7 +235,7 @@ class DebateNodeRunner:
             debate_state.final_answer = "No model responses were available for final synthesis."
             return debate_state
 
-        await self._progress("Generating final synthesis")
+        await self._progress("Generating final synthesis", debate_state)
         prompt = self.prompt_loader.render(
             "final_synthesis",
             {
@@ -237,17 +257,19 @@ class DebateNodeRunner:
             )
             if response:
                 debate_state.final_answer = response
+                await self._progress("Final synthesis complete", debate_state)
                 return debate_state
 
         debate_state.final_answer = (
             "Final synthesis failed in all available models. "
             "Check the saved logs for model-specific errors."
         )
+        await self._progress("Final synthesis failed", debate_state)
         return debate_state
 
     async def log_result(self, state: DebateState | dict[str, Any]) -> DebateState:
         debate_state = coerce_state(state)
-        await self._progress("Saving logs")
+        await self._progress("Saving logs", debate_state)
         try:
             self.jsonl_logger.write(debate_state)
             self.sqlite_store.save(debate_state)
@@ -266,20 +288,35 @@ class DebateNodeRunner:
         adapter = self.adapters.get(model_key)
         if adapter is None:
             state.record_turn(model_key, iteration, phase, prompt, "", "adapter not initialized")
+            await self._progress(f"{self._model_label(model_key)}: {phase.replace('_', ' ')} failed", state)
             return None
 
+        phase_label = phase.replace("_", " ")
+        await self._progress(f"{self._model_label(model_key)}: {phase_label} started", state)
         try:
             response = await adapter.ask(prompt)
             state.record_turn(model_key, iteration, phase, prompt, response)
+            await self._progress(f"{self._model_label(model_key)}: {phase_label} complete", state)
             return response
         except Exception as exc:  # noqa: BLE001 - one model failure must not crash the app.
             state.record_turn(model_key, iteration, phase, prompt, "", str(exc))
+            await self._progress(f"{self._model_label(model_key)}: {phase_label} failed", state)
             return None
 
-    async def _progress(self, message: str) -> None:
+    async def _progress(self, message: str, state: DebateState | None = None) -> None:
         if self.progress_callback is None:
             return
-        result = self.progress_callback(message)
+        callback = self.progress_callback
+        try:
+            signature = inspect.signature(callback)
+            supports_state = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            ) or len(signature.parameters) >= 2
+        except (TypeError, ValueError):
+            supports_state = False
+
+        result = callback(message, state) if supports_state else callback(message)
         if hasattr(result, "__await__"):
             await result
 

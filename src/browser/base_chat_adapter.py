@@ -98,7 +98,6 @@ class BaseChatAdapter:
         submitted_prompt: str | None = None,
     ) -> None:
         timeout_ms = int(self.settings.get("browser", {}).get("timeout_ms", 120000))
-        min_chars = int(self.settings.get("debate", {}).get("min_response_chars", 100))
         poll_interval = float(self.settings.get("browser", {}).get("response_poll_interval_seconds", 1.0))
         stable_polls_required = int(self.settings.get("browser", {}).get("response_stable_polls", 3))
         deadline = time.monotonic() + timeout_ms / 1000
@@ -116,7 +115,7 @@ class BaseChatAdapter:
             if is_new_response:
                 saw_new_response = True
 
-            if saw_new_response and current_text == last_text and len(current_text) >= min_chars:
+            if saw_new_response and current_text == last_text and current_text.strip():
                 stable_count += 1
             else:
                 stable_count = 0
