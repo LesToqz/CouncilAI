@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -74,10 +75,6 @@ class EdgeManager:
             for page in context.pages:
                 if _page_matches_target(page.url, target_host):
                     self.contexts[model_key] = context
-                    try:
-                        await page.bring_to_front()
-                    except Exception:
-                        pass
                     return context, page
 
         if self.settings.get("browser", {}).get("open_missing_tabs", False):
@@ -110,11 +107,67 @@ class EdgeManager:
 
         return found
 
+    async def open_url_in_background(self, url: str, app_url: str | None = None) -> Page | None:
+        browser = await self.connect_existing_browser()
+        target_host = _normalized_host(url)
+        app_page = self._find_page(app_url) if app_url else None
+
+        existing_page = self._find_page(url)
+        if existing_page is not None:
+            if app_page is not None:
+                await _try_bring_to_front(app_page)
+            return existing_page
+
+        page: Page | None = None
+        session = None
+        try:
+            session = await browser.new_browser_cdp_session()
+            await session.send("Target.createTarget", {"url": url, "background": True})
+            page = await self._wait_for_page(target_host)
+        except Exception:
+            page = None
+        finally:
+            if session is not None:
+                try:
+                    await session.detach()
+                except Exception:
+                    pass
+
+        if page is None:
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded")
+
+        if app_page is not None:
+            await _try_bring_to_front(app_page)
+        return page
+
     async def open_model_page(self, model_key: str, url: str) -> Page:
         context = self.contexts[model_key]
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(url, wait_until="domcontentloaded")
         return page
+
+    def _find_page(self, url: str | None) -> Page | None:
+        if self.browser is None or not url:
+            return None
+        target_host = _normalized_host(url)
+        for context in self.browser.contexts:
+            for page in context.pages:
+                if _page_matches_target(page.url, target_host):
+                    return page
+        return None
+
+    async def _wait_for_page(self, target_host: str, timeout_seconds: float = 8) -> Page | None:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if self.browser is not None:
+                for context in self.browser.contexts:
+                    for page in context.pages:
+                        if _page_matches_target(page.url, target_host):
+                            return page
+            await asyncio.sleep(0.2)
+        return None
 
     async def stop(self) -> None:
         if not self.connected_over_cdp:
@@ -143,3 +196,10 @@ def _page_matches_target(page_url: str, target_host: str) -> bool:
         return False
     page_host = _normalized_host(page_url)
     return page_host == target_host or page_host.endswith(f".{target_host}")
+
+
+async def _try_bring_to_front(page: Page) -> None:
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass

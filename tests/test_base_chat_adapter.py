@@ -51,6 +51,28 @@ def test_wait_for_response_accepts_short_stable_text() -> None:
     asyncio.run(adapter.wait_for_response_complete(previous_response="old response"))
 
 
+def test_open_does_not_force_existing_page_to_front() -> None:
+    class ExistingPage:
+        def __init__(self) -> None:
+            self.brought_to_front = False
+
+        async def bring_to_front(self) -> None:
+            self.brought_to_front = True
+
+    page = ExistingPage()
+    adapter = BaseChatAdapter(
+        model_key="fake",
+        site={"url": "https://example.test"},
+        context=None,
+        settings={},
+        page=page,
+    )
+
+    asyncio.run(adapter.open())
+
+    assert not page.brought_to_front
+
+
 def test_prompt_echo_is_rejected() -> None:
     adapter = FakeAdapter(
         [

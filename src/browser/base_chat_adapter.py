@@ -57,10 +57,6 @@ class BaseChatAdapter:
 
     async def open(self) -> None:
         if self.page is not None:
-            try:
-                await self.page.bring_to_front()
-            except Exception:
-                pass
             return
 
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()

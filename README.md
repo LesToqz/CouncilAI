@@ -1,4 +1,4 @@
-# CouncilAI
+# CouncilAI v1
 
 CouncilAI is a local multi-LLM debate assistant. It attaches to ChatGPT, Gemini, and Claude tabs in a controllable Microsoft Edge window, sends prompts through their consumer chat UIs, lets the models critique and refine each other, and returns a final synthesized answer.
 
@@ -49,7 +49,17 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 Start the app:
 
 ```powershell
-python app.py
+.\.venv\Scripts\python.exe app.py
+```
+
+Expected terminal startup output:
+
+```text
+CouncilAI v1
+
+* Running on local URL:  http://127.0.0.1:7860
+* To create a public link, set `share=True` in `launch()`.
+Started controllable Edge at http://127.0.0.1:9222.
 ```
 
 The app automatically opens a separate controllable Edge window with the CouncilAI tab. In that same Edge window, manually open:

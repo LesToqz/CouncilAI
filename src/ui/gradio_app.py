@@ -30,6 +30,15 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
     async def handle_check_tabs() -> str:
         return await check_existing_tabs(settings)
 
+    async def handle_open_chatgpt() -> str:
+        return await open_model_tab(settings, "chatgpt")
+
+    async def handle_open_gemini() -> str:
+        return await open_model_tab(settings, "gemini")
+
+    async def handle_open_claude() -> str:
+        return await open_model_tab(settings, "claude")
+
     async def handle_run(
         prompt: str,
         mode: str,
@@ -138,6 +147,9 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                         claude_checkbox = gr.Checkbox(value=True, label="Use Claude")
                     with gr.Column(scale=5, elem_classes=["drawer-actions"]):
                         check_tabs_button = gr.Button("Check Connections")
+                        open_chatgpt_button = gr.Button("Open ChatGPT")
+                        open_gemini_button = gr.Button("Open Gemini")
+                        open_claude_button = gr.Button("Open Claude")
 
             with gr.Row(elem_classes=["composer-bar"]):
                 plus_button = gr.Button("+", elem_classes=["composer-icon-button"])
@@ -165,10 +177,34 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=status_box,
         )
 
+        open_chatgpt_button.click(
+            fn=handle_open_chatgpt,
+            inputs=None,
+            outputs=status_box,
+        )
+
+        open_gemini_button.click(
+            fn=handle_open_gemini,
+            inputs=None,
+            outputs=status_box,
+        )
+
+        open_claude_button.click(
+            fn=handle_open_claude,
+            inputs=None,
+            outputs=status_box,
+        )
+
         mode_radio.change(
-            fn=lambda mode: gr.update(visible=False),
+            fn=lambda mode: (
+                gr.update(visible=False),
+                gr.update(value=_welcome_markdown(), visible=True),
+            ),
             inputs=mode_radio,
-            outputs=observable_box,
+            outputs=[
+                observable_box,
+                final_answer_box,
+            ],
         )
 
         execute_button.click(
@@ -181,7 +217,11 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                 gemini_checkbox,
                 claude_checkbox,
             ],
-            outputs=[status_box, observable_box, final_answer_box],
+            outputs=[
+                status_box,
+                observable_box,
+                final_answer_box,
+            ],
         )
 
         prompt_box.submit(
@@ -194,7 +234,11 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                 gemini_checkbox,
                 claude_checkbox,
             ],
-            outputs=[status_box, observable_box, final_answer_box],
+            outputs=[
+                status_box,
+                observable_box,
+                final_answer_box,
+            ],
         )
 
     return demo, theme, _custom_css()
@@ -205,25 +249,44 @@ async def check_existing_tabs(settings: dict) -> str:
     app_url = f"http://{app_settings.get('host', '127.0.0.1')}:{app_settings.get('port', 7860)}"
     launch_result = launch_controlled_edge(settings, app_url)
     manager = EdgeManager(settings)
-    statuses = [f"<p class=\"status-message\">{html.escape(launch_result.message)}</p>", '<div class="connection-list">']
     try:
         found = await manager.find_existing_ai_tabs()
-        for model_key in MODEL_ORDER:
-            site = settings["model_sites"][model_key]
-            page_url = found.get(model_key)
-            if page_url:
-                statuses.append(f"<p><strong>{html.escape(site['name'])}</strong><span>Connected</span></p>")
-            else:
-                site_url = site["url"]
-                statuses.append(
-                    f'<p><strong>{html.escape(site["name"])}</strong>'
-                    f'<a href="{html.escape(site_url)}" target="_blank">Open tab</a></p>'
-                )
+        return _connection_status_html(settings, found, launch_result.message)
     except Exception as exc:  # noqa: BLE001
-        statuses.append(f"<p><strong>Attach failed</strong><span>{html.escape(str(exc))}</span></p>")
+        return _message_panel("Attach failed", str(exc))
     finally:
         await manager.stop()
 
+
+async def open_model_tab(settings: dict, model_key: str) -> str:
+    app_settings = settings.get("app", {})
+    app_url = f"http://{app_settings.get('host', '127.0.0.1')}:{app_settings.get('port', 7860)}"
+    launch_controlled_edge(settings, app_url)
+    manager = EdgeManager(settings)
+    site = settings.get("model_sites", {}).get(model_key, {})
+    site_url = site.get("url")
+    site_name = site.get("name", model_key.title())
+    if not site_url:
+        return _message_panel("Open failed", f"No URL configured for {site_name}.")
+
+    try:
+        await manager.open_url_in_background(site_url, app_url=app_url)
+        found = await manager.find_existing_ai_tabs()
+        return _connection_status_html(settings, found, f"{site_name} tab opened. CouncilAI should stay in front.")
+    except Exception as exc:  # noqa: BLE001
+        return _message_panel("Open failed", str(exc))
+    finally:
+        await manager.stop()
+
+
+def _connection_status_html(settings: dict, found: dict[str, str | None], message: str) -> str:
+    statuses = [f'<p class="status-message">{html.escape(message)}</p>', '<div class="connection-list">']
+    for model_key in MODEL_ORDER:
+        site = settings["model_sites"][model_key]
+        if found.get(model_key):
+            statuses.append(f"<p><strong>{html.escape(site['name'])}</strong><span>Connected</span></p>")
+        else:
+            statuses.append(f"<p><strong>{html.escape(site['name'])}</strong><span>Missing</span></p>")
     statuses.append("</div>")
     return "\n".join(statuses)
 
@@ -237,7 +300,11 @@ async def run_debate(
     use_gemini: bool,
     use_claude: bool,
 ) -> tuple[str, Any, Any]:
-    final_update = ("", gr.update(value="", visible=False), gr.update(value="", visible=False))
+    final_update = (
+        "",
+        gr.update(value="", visible=False),
+        gr.update(value="", visible=False),
+    )
     async for update in run_debate_stream(
         settings,
         prompt,
@@ -300,15 +367,17 @@ async def run_debate_stream(
         progress_queue.put_nowait((message, progress_state))
 
     if mode == "debate":
+        compare_html = _observable_board_html(settings, state, progress_messages, active_models)
         yield (
             _live_status_markdown(active_models, progress_messages, mode),
-            gr.update(value=_observable_board_html(settings, state, progress_messages, active_models), visible=True),
+            gr.update(value=compare_html, visible=True),
             gr.update(value="", visible=False),
         )
     else:
+        compare_html = _normal_board_html(settings, state, active_models)
         yield (
             _live_status_markdown(active_models, progress_messages, mode),
-            gr.update(value=_normal_board_html(settings, state, active_models), visible=True),
+            gr.update(value=compare_html, visible=True),
             gr.update(value="", visible=False),
         )
 
@@ -326,18 +395,29 @@ async def run_debate_stream(
                 latest_state = progress_state
 
             if mode == "debate":
+                compare_html = _observable_board_html(settings, latest_state, progress_messages, active_models)
+                output_html = (
+                    _debate_switcher_html(
+                        compare_html,
+                        _final_answer_html(latest_state.final_answer),
+                        latest_state.run_id,
+                    )
+                    if latest_state.final_answer
+                    else compare_html
+                )
                 yield (
                     _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
                     gr.update(
-                        value=_observable_board_html(settings, latest_state, progress_messages, active_models),
+                        value=output_html,
                         visible=True,
                     ),
                     gr.update(value="", visible=False),
                 )
             else:
+                compare_html = _normal_board_html(settings, latest_state, active_models)
                 yield (
                     _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
-                    gr.update(value=_normal_board_html(settings, latest_state, active_models), visible=True),
+                    gr.update(value=compare_html, visible=True),
                     gr.update(value="", visible=False),
                 )
 
@@ -352,17 +432,20 @@ async def run_debate_stream(
 
     status = _status_markdown(final_state)
     if mode == "normal":
+        compare_html = _normal_board_html(settings, final_state, active_models)
         yield (
             status,
-            gr.update(value=_normal_board_html(settings, final_state, active_models), visible=True),
+            gr.update(value=compare_html, visible=True),
             gr.update(value="", visible=False),
         )
         return
 
+    compare_html = _observable_board_html(settings, final_state, progress_messages, active_models)
+    final_html = _final_answer_html(final_state.final_answer)
     yield (
         status,
-        gr.update(value=_observable_board_html(settings, final_state, progress_messages, active_models), visible=True),
-        gr.update(value=_format_final_answer(final_state.final_answer), visible=True),
+        gr.update(value=_debate_switcher_html(compare_html, final_html, final_state.run_id), visible=True),
+        gr.update(value="", visible=False),
     )
 
 
@@ -432,21 +515,13 @@ def _observable_board_html(
     progress_messages: list[str],
     selected_models: list[str],
 ) -> str:
+    del progress_messages
     columns = "\n".join(
-        _model_column_html(settings, state, model_key, progress_messages, selected_models)
+        _model_column_html(settings, state, model_key, [], selected_models)
         for model_key in MODEL_ORDER
-    )
-    events = "\n".join(
-        f'<li><span>{html.escape(message)}</span></li>'
-        for message in progress_messages[-8:]
     )
     return (
         '<section class="debate-board">'
-        '<div class="debate-board-header">'
-        '<div><p class="eyebrow">Debate</p><h2>Live council board</h2></div>'
-        '<div class="live-indicator"><span></span>Live</div>'
-        "</div>"
-        f'<ul class="debate-event-strip">{events}</ul>'
         f'<div class="debate-columns">{columns}</div>'
         "</section>"
     )
@@ -665,6 +740,29 @@ def _is_delimiter_row(row: list[str]) -> bool:
 
 def _format_final_answer(answer: str | None) -> str:
     return clean_response_text(answer or "")
+
+
+def _final_answer_html(answer: str | None) -> str:
+    return (
+        '<section class="final-only-view">'
+        f"{_markdown_fragment_to_html(answer or '')}"
+        "</section>"
+    )
+
+
+def _debate_switcher_html(compare_html: str, final_html: str, run_id: str) -> str:
+    toggle_id = f"debate-view-toggle-{re.sub(r'[^a-zA-Z0-9_-]', '', run_id)}"
+    return (
+        '<section class="debate-switcher">'
+        f'<input id="{html.escape(toggle_id)}" class="debate-view-checkbox" type="checkbox">'
+        f'<div class="debate-compare-view">{compare_html}</div>'
+        f'<div class="debate-final-view">{final_html}</div>'
+        f'<label for="{html.escape(toggle_id)}" class="debate-view-toggle">'
+        '<span class="toggle-final-label">final</span>'
+        '<span class="toggle-compare-label">compare</span>'
+        "</label>"
+        "</section>"
+    )
 
 
 def _stat_card(label: str, value: str) -> str:
@@ -1012,6 +1110,12 @@ details > *:not(summary) {
 
 .debate-board {
     width: 100%;
+    color: var(--cai-text);
+}
+.final-only-view {
+    width: min(100%, 960px);
+    margin: 0 auto;
+    padding: 6px 0 36px;
     color: var(--cai-text);
 }
 .debate-board-header {
@@ -1378,6 +1482,50 @@ button.primary.execute-button * {
     text-align: center;
     margin: 6px 0 0;
 }
+.debate-switcher {
+    width: 100%;
+}
+.debate-view-checkbox {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.debate-view-checkbox:not(:checked) ~ .debate-final-view,
+.debate-view-checkbox:not(:checked) ~ .debate-view-toggle .toggle-compare-label,
+.debate-view-checkbox:checked ~ .debate-compare-view,
+.debate-view-checkbox:checked ~ .debate-view-toggle .toggle-final-label {
+    display: none !important;
+}
+.debate-view-toggle {
+    position: fixed !important;
+    left: 22px !important;
+    bottom: 92px !important;
+    z-index: 80 !important;
+    min-width: 88px !important;
+    width: 88px !important;
+    height: 42px !important;
+    min-height: 42px !important;
+    border-radius: 999px !important;
+    color: #111111 !important;
+    background: #f4f4f5 !important;
+    border: 1px solid #f4f4f5 !important;
+    font-size: 14px !important;
+    font-weight: 750 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    cursor: pointer !important;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45) !important;
+}
+.debate-view-toggle * {
+    color: #111111 !important;
+}
+.debate-view-toggle:hover {
+    background: #ffffff !important;
+    border-color: #ffffff !important;
+}
 
 .options-drawer {
     width: min(100%, 1060px) !important;
@@ -1445,6 +1593,8 @@ button.primary.execute-button * {
 }
 .drawer-actions {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
     justify-content: center;
 }
 .drawer-actions button,
@@ -1558,6 +1708,14 @@ button.primary.execute-button * {
     .execute-button::after {
         content: "Run";
         font-size: 14px;
+    }
+    .debate-view-toggle {
+        left: 12px !important;
+        bottom: 142px !important;
+        width: 76px !important;
+        min-width: 76px !important;
+        height: 38px !important;
+        min-height: 38px !important;
     }
     .connection-list,
     .status-grid {
