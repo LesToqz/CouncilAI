@@ -258,15 +258,21 @@ class BaseChatAdapter:
         normalized_prompt = " ".join(prompt.split())
         if not normalized_text:
             return False
+        # Exact match — definitely an echo.
         if normalized_text == normalized_prompt:
             return True
-        # Detect when the extracted text is a leading substring of the prompt
-        # (e.g. the user-message bubble is still being rendered by the UI).
-        if len(normalized_text) > 40 and normalized_prompt.startswith(normalized_text):
+        # The extracted text is a short leading fragment of the prompt
+        # (e.g. the user-message bubble is still rendering).
+        # Only flag this when the text is clearly much shorter than the prompt
+        # so we don't accidentally flag a genuine long response.
+        if (
+            len(normalized_text) > 40
+            and len(normalized_text) < len(normalized_prompt) * 0.6
+            and normalized_prompt.startswith(normalized_text)
+        ):
             return True
-        # Detect when the extracted text contains the prompt verbatim.
-        if len(normalized_prompt) > 40 and normalized_prompt in normalized_text:
-            return True
+        # Specific debate-system-prompt markers — these appear at the start of
+        # the injected instructions and should never open a real reply.
         prompt_markers = (
             "You are participating in a multi-model debate.",
             "You are the final synthesizer in a multi-model debate.",

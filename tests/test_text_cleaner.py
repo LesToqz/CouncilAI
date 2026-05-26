@@ -17,6 +17,11 @@ def test_clean_response_text_removes_internal_prompt_and_images() -> None:
     assert clean_response_text(text) == "Answer"
 
 
+def test_clean_response_text_removes_model_self_prefixes() -> None:
+    assert clean_response_text("Gemini said\n\nActual answer") == "Actual answer"
+    assert clean_response_text("Claude responded: Hey there") == "Hey there"
+
+
 def test_clean_response_html_preserves_tables_as_markdown() -> None:
     markup = """
     <div>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from src.browser.base_chat_adapter import BaseChatAdapter
+from src.browser.base_chat_adapter import BaseChatAdapter, EmptyResponseError
 
 
 class GeminiAdapter(BaseChatAdapter):
@@ -14,8 +14,9 @@ class GeminiAdapter(BaseChatAdapter):
         "textarea",
     ]
     RESPONSE_SELECTORS = [
-        # Gemini marks model-turn containers; target only model (not user) messages.
+        "model-response",
         "model-response message-content",
+        "message-content",
         ".model-response-text",
         ".markdown",
         "[data-response-index]",
@@ -32,87 +33,105 @@ class GeminiAdapter(BaseChatAdapter):
         "button.send-button",
         "button:has-text('Send')",
     ]
-
-    # ── Override extract_latest_response ─────────────────────────────
-    # Gemini wraps each model reply inside a <model-response> container.
-    # We count how many model-response elements exist *before* we send a
-    # prompt so we can always grab text from the very last one, avoiding
-    # stale results from earlier turns.
+    ASSISTANT_BLOCK_SELECTORS = [
+        "model-response",
+        "model-response message-content",
+        "message-content",
+        ".model-response-text",
+        "[data-response-index]",
+        ".markdown",
+    ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._response_count_before_send: int = 0
+        self._response_count_before_send = 0
+        self._response_counts_before_send: dict[str, int] = {}
 
     async def send_prompt(self, prompt: str) -> None:
-        """Snapshot the current number of model-response blocks, then send."""
-        self._response_count_before_send = await self._count_model_responses()
+        self._response_counts_before_send = await self._count_response_blocks_by_selector()
+        self._response_count_before_send = max(self._response_counts_before_send.values(), default=0)
         await super().send_prompt(prompt)
 
     async def extract_latest_response(self) -> str:
-        """Return text only from the newest model-response block.
-
-        Gemini keeps every turn on the same page, so we must avoid
-        returning text from an older reply.  The approach:
-        1.  Try ``model-response message-content`` to get model-only
-            message blocks (skips user messages).
-        2.  Among those blocks, pick the **last** one whose index is
-            >= ``_response_count_before_send`` (i.e. it appeared after
-            we submitted the latest prompt).
-        3.  Fall back to the generic selectors in ``RESPONSE_SELECTORS``
-            for forward-compatibility with DOM changes.
-        """
         if self.page is None:
             return ""
 
-        # ── Primary: scoped to model-response containers ────────────
-        model_msg_selector = "model-response message-content"
-        try:
-            all_msgs = self.page.locator(model_msg_selector)
-            count = await all_msgs.count()
-            if count > 0:
-                # Walk from newest to oldest, pick the first that is new.
-                for idx in range(count - 1, -1, -1):
-                    if idx < self._response_count_before_send:
-                        break  # everything from here is old
-                    text = await self._extract_clean_text(all_msgs.nth(idx))
-                    if text:
-                        return text
-        except Exception:
-            pass
+        tried_selectors = set()
+        for selector in self.ASSISTANT_BLOCK_SELECTORS:
+            tried_selectors.add(selector)
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+            except Exception:
+                continue
 
-        # ── Fallback: remaining selectors (skip the one we just tried) ──
+            previous_count = self._response_counts_before_send.get(selector, 0)
+            for index in range(count - 1, -1, -1):
+                if index < previous_count:
+                    break
+                text = await self._extract_clean_text(locator.nth(index))
+                if text:
+                    return text
+
         for selector in self.RESPONSE_SELECTORS:
-            if selector == model_msg_selector:
+            if selector in tried_selectors:
                 continue
             try:
                 locator = self.page.locator(selector)
                 count = await locator.count()
             except Exception:
                 continue
-            cleaned = [await self._extract_clean_text(locator.nth(idx)) for idx in range(count)]
-            non_empty = [t for t in cleaned if t]
+            cleaned = [await self._extract_clean_text(locator.nth(index)) for index in range(count)]
+            non_empty = [text for text in cleaned if text]
             if non_empty:
                 return non_empty[-1]
         return ""
 
     async def _count_model_responses(self) -> int:
-        """Return how many ``model-response message-content`` elements exist."""
+        counts = await self._count_response_blocks_by_selector()
+        return max(counts.values(), default=0)
+
+    async def _count_response_blocks_by_selector(self) -> dict[str, int]:
         if self.page is None:
-            return 0
+            return {}
+        counts = {}
+        for selector in self.ASSISTANT_BLOCK_SELECTORS:
+            try:
+                counts[selector] = await self.page.locator(selector).count()
+            except Exception:
+                continue
+        return counts
+
+    async def _has_active_response_indicator(self) -> bool:
+        if self.page is None:
+            return False
+
+        for selector in self.STOP_SELECTORS:
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    if await candidate.is_visible():
+                        return True
+            except Exception:
+                continue
+
         try:
-            return await self.page.locator("model-response message-content").count()
+            busy = self.page.locator("[aria-busy='true'], [data-is-streaming='true']")
+            count = await busy.count()
+            for index in range(count):
+                if await busy.nth(index).is_visible():
+                    return True
+            return False
         except Exception:
-            return 0
+            return False
 
     async def wait_for_response_complete(
         self,
         previous_response: str | None = None,
         submitted_prompt: str | None = None,
     ) -> None:
-        """Gemini-specific wait: first wait for a *new* model-response
-        block to appear (index >= _response_count_before_send), then
-        wait for the text inside it to stabilise."""
-
         timeout_ms = int(self.settings.get("browser", {}).get("timeout_ms", 120000))
         poll_interval = float(self.settings.get("browser", {}).get("response_poll_interval_seconds", 1.0))
         stable_polls_required = int(self.settings.get("browser", {}).get("response_stable_polls", 3))
@@ -123,19 +142,21 @@ class GeminiAdapter(BaseChatAdapter):
         saw_new = False
 
         while time.monotonic() < deadline:
-            # Let the stop button disappear first (model still generating).
-            await self._wait_while_stop_button_visible()
-
             current_count = await self._count_model_responses()
             if current_count > self._response_count_before_send:
                 saw_new = True
 
             current_text = await self.extract_latest_response()
 
-            # Guard against picking up the prompt echo.
             if submitted_prompt and self._looks_like_prompt_echo(current_text, submitted_prompt):
                 await asyncio.sleep(poll_interval)
                 continue
+
+            # Gemini sometimes streams a later turn through a reused container
+            # or a new selector family. In that case the count may not increase,
+            # but changed stable text is still a valid new response.
+            if current_text and current_text != (previous_response or ""):
+                saw_new = True
 
             if saw_new and current_text and current_text != (previous_response or ""):
                 if current_text == last_text and current_text.strip():
@@ -144,16 +165,13 @@ class GeminiAdapter(BaseChatAdapter):
                     stable_count = 0
                     last_text = current_text
 
-                if stable_count >= stable_polls_required:
+                if stable_count >= stable_polls_required and not await self._has_active_response_indicator():
                     return
 
             await asyncio.sleep(poll_interval)
 
-        # Timeout fallback ─ same checks as the base class.
         if not last_text.strip() or last_text == (previous_response or ""):
-            from src.browser.base_chat_adapter import EmptyResponseError
             raise EmptyResponseError(f"{self.model_key}: Gemini response did not appear after prompt submission")
 
         if submitted_prompt and self._looks_like_prompt_echo(last_text, submitted_prompt):
-            from src.browser.base_chat_adapter import EmptyResponseError
             raise EmptyResponseError(f"{self.model_key}: latest text looks like the submitted prompt, not a response")

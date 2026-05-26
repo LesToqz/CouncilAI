@@ -10,6 +10,7 @@ import gradio as gr
 from src.browser.edge_manager import EdgeManager
 from src.orchestration.graph import DebateGraph
 from src.orchestration.state import DebateState
+from src.storage.sqlite_store import SQLiteStore
 from src.utils.edge_launcher import launch_controlled_edge
 from src.utils.text_cleaner import clean_response_text
 
@@ -20,12 +21,14 @@ MODEL_ACCENTS = {
     "gemini": "#7aa2ff",
     "claude": "#f59e66",
 }
+HISTORY_LIMIT = 50
 
 
 def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
     app_name = settings.get("app", {}).get("name", "CouncilAI")
     max_iterations = int(settings.get("debate", {}).get("max_iterations", 5))
     default_iterations = int(settings.get("debate", {}).get("default_iterations", 2))
+    SQLiteStore(settings).init_db()
 
     async def handle_check_tabs() -> str:
         return await check_existing_tabs(settings)
@@ -58,12 +61,31 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
         ):
             yield update
 
+    def handle_new_chat() -> tuple[Any, ...]:
+        return (
+            gr.update(value="", visible=False),
+            gr.update(value=""),
+            _empty_status_markdown(),
+            *_history_slot_updates(settings),
+        )
+
+    def handle_history_select(run_id: str | None) -> tuple[str, Any, Any]:
+        return load_history_run(settings, run_id)
+
     def toggle_options(is_open: bool) -> tuple[bool, Any, Any]:
         next_open = not bool(is_open)
         return (
             next_open,
             gr.update(visible=next_open),
             gr.update(value="x" if next_open else "+"),
+        )
+
+    def toggle_sidebar(is_open: bool) -> tuple[bool, str, Any]:
+        next_open = not bool(is_open)
+        return (
+            next_open,
+            _sidebar_state_style(next_open),
+            gr.update(value="<<" if next_open else ">>"),
         )
 
     theme = gr.themes.Soft(
@@ -75,100 +97,126 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
 
     with gr.Blocks(title=app_name, elem_id="council-shell") as demo:
         drawer_open = gr.State(False)
+        sidebar_open = gr.State(True)
+        initial_history = _history_items(settings)
+        history_buttons = []
+        history_run_states = []
+        sidebar_state_style = gr.HTML(
+            value=_sidebar_state_style(True),
+            elem_classes=["sidebar-state-style"],
+        )
+        sidebar_toggle_button = gr.Button("<<", elem_classes=["sidebar-toggle-button"])
 
-        with gr.Row(elem_classes=["topbar"]):
-            gr.HTML(
-                f"""
-                <div class="brand">
-                    <div class="brand-mark"></div>
-                    <div>
-                        <h1>{html.escape(app_name)}</h1>
-                        <p>Multi-model debate assistant</p>
-                    </div>
-                </div>
-                """
-            )
+        with gr.Row(elem_classes=["council-layout"]):
+            with gr.Column(scale=0, min_width=0, elem_classes=["history-sidebar"]):
+                new_chat_button = gr.Button("New chat", elem_classes=["history-new-chat"])
+                with gr.Column(min_width=0, elem_classes=["history-list"]):
+                    for index in range(HISTORY_LIMIT):
+                        history_item = initial_history[index] if index < len(initial_history) else None
+                        history_run_states.append(gr.State(history_item["run_id"] if history_item else None))
+                        history_buttons.append(
+                            gr.Button(
+                                history_item["title"] if history_item else "",
+                                visible=history_item is not None,
+                                elem_classes=["history-item"],
+                            )
+                        )
 
-        with gr.Column(elem_classes=["answer-shell"]):
-            final_answer_box = gr.Markdown(
-                value=_welcome_markdown(),
-                label="Final Answer",
-                elem_classes=["final-answer-box"],
-            )
-            observable_box = gr.HTML(
-                value="",
-                visible=False,
-                label="Mode Output",
-                elem_classes=["debate-trace-box"],
-            )
-
-        with gr.Column(elem_classes=["composer-shell"]):
-            with gr.Column(visible=False, elem_classes=["options-drawer"]) as options_drawer:
-                gr.HTML(
-                    """
-                    <div class="drawer-header">
-                        <div>
-                            <p class="eyebrow">Run Settings</p>
-                            <h2>Connections and iterations</h2>
+            with gr.Column(elem_classes=["main-chat-area"]):
+                with gr.Row(elem_classes=["topbar"]):
+                    gr.HTML(
+                        f"""
+                        <div class="brand">
+                            <div class="brand-mark"></div>
+                            <div>
+                                <h1>{html.escape(app_name)}</h1>
+                                <p>Multi-model debate assistant</p>
+                            </div>
                         </div>
-                    </div>
-                    """
-                )
-                status_box = gr.Markdown(
-                    value=_empty_status_markdown(),
-                    elem_classes=["status-box"],
-                    sanitize_html=False,
-                )
-                with gr.Row(elem_classes=["drawer-grid"]):
-                    with gr.Column(scale=5, elem_classes=["drawer-card"]):
-                        gr.HTML('<p class="field-label">Mode</p>')
-                        mode_radio = gr.Radio(
-                            choices=["Normal", "Debate"],
-                            value="Normal",
-                            label="Mode",
-                            show_label=False,
-                            container=False,
-                        )
-                    with gr.Column(scale=7, elem_classes=["drawer-card"]):
-                        gr.HTML('<p class="field-label">Debate iterations</p>')
-                        iterations_slider = gr.Slider(
-                            minimum=1,
-                            maximum=max_iterations,
-                            value=min(default_iterations, max_iterations),
-                            step=1,
-                            label="Number of Debate Iterations",
-                            show_label=False,
-                            container=False,
-                        )
-                with gr.Row(elem_classes=["drawer-grid"]):
-                    with gr.Column(scale=7, elem_classes=["drawer-card model-card"]):
-                        chatgpt_checkbox = gr.Checkbox(value=True, label="Use ChatGPT")
-                        gemini_checkbox = gr.Checkbox(value=True, label="Use Gemini")
-                        claude_checkbox = gr.Checkbox(value=True, label="Use Claude")
-                    with gr.Column(scale=5, elem_classes=["drawer-actions"]):
-                        check_tabs_button = gr.Button("Check Connections")
-                        open_chatgpt_button = gr.Button("Open ChatGPT")
-                        open_gemini_button = gr.Button("Open Gemini")
-                        open_claude_button = gr.Button("Open Claude")
+                        """
+                    )
 
-            with gr.Row(elem_classes=["composer-bar"]):
-                plus_button = gr.Button("+", elem_classes=["composer-icon-button"])
-                prompt_box = gr.Textbox(
-                    label="Prompt",
-                    lines=1,
-                    show_label=False,
-                    placeholder="Ask anything",
-                    container=False,
-                    elem_classes=["composer-input"],
-                )
-                execute_button = gr.Button("Execute", variant="primary", elem_classes=["execute-button"])
+                with gr.Column(elem_classes=["answer-shell"]):
+                    observable_box = gr.HTML(
+                        value="",
+                        visible=False,
+                        label="Mode Output",
+                        elem_classes=["debate-trace-box"],
+                    )
 
-            gr.HTML('<p class="composer-note">CouncilAI where AI brains discuss each other</p>')
+                with gr.Column(elem_classes=["composer-shell"]):
+                    with gr.Column(visible=False, elem_classes=["options-drawer"]) as options_drawer:
+                        gr.HTML(
+                            """
+                            <div class="drawer-header">
+                                <div>
+                                    <p class="eyebrow">Run Settings</p>
+                                    <h2>Connections and iterations</h2>
+                                </div>
+                            </div>
+                            """
+                        )
+                        status_box = gr.Markdown(
+                            value=_empty_status_markdown(),
+                            elem_classes=["status-box"],
+                            sanitize_html=False,
+                        )
+                        with gr.Row(elem_classes=["drawer-grid"]):
+                            with gr.Column(scale=5, elem_classes=["drawer-card"]):
+                                gr.HTML('<p class="field-label">Mode</p>')
+                                mode_radio = gr.Radio(
+                                    choices=["Normal", "Debate"],
+                                    value="Normal",
+                                    label="Mode",
+                                    show_label=False,
+                                    container=False,
+                                )
+                            with gr.Column(scale=7, elem_classes=["drawer-card"]):
+                                gr.HTML('<p class="field-label">Debate iterations</p>')
+                                iterations_slider = gr.Slider(
+                                    minimum=1,
+                                    maximum=max_iterations,
+                                    value=min(default_iterations, max_iterations),
+                                    step=1,
+                                    label="Number of Debate Iterations",
+                                    show_label=False,
+                                    container=False,
+                                )
+                        with gr.Row(elem_classes=["drawer-grid"]):
+                            with gr.Column(scale=7, elem_classes=["drawer-card model-card"]):
+                                chatgpt_checkbox = gr.Checkbox(value=True, label="Use ChatGPT")
+                                gemini_checkbox = gr.Checkbox(value=True, label="Use Gemini")
+                                claude_checkbox = gr.Checkbox(value=True, label="Use Claude")
+                            with gr.Column(scale=5, elem_classes=["drawer-actions"]):
+                                check_tabs_button = gr.Button("Check Connections")
+                                open_chatgpt_button = gr.Button("Open ChatGPT")
+                                open_gemini_button = gr.Button("Open Gemini")
+                                open_claude_button = gr.Button("Open Claude")
+
+                    with gr.Row(elem_classes=["composer-bar"]):
+                        plus_button = gr.Button("+", elem_classes=["composer-icon-button"])
+                        prompt_box = gr.Textbox(
+                            label="Prompt",
+                            lines=1,
+                            show_label=False,
+                            placeholder="Ask anything",
+                            container=False,
+                            elem_classes=["composer-input"],
+                        )
+                        execute_button = gr.Button("Execute", variant="primary", elem_classes=["execute-button"])
+
+                    gr.HTML('<p class="composer-note">CouncilAI where AI brains discuss each other</p>')
 
         plus_button.click(
             fn=toggle_options,
             inputs=drawer_open,
             outputs=[drawer_open, options_drawer, plus_button],
+        )
+
+        sidebar_toggle_button.click(
+            fn=toggle_sidebar,
+            inputs=sidebar_open,
+            outputs=[sidebar_open, sidebar_state_style, sidebar_toggle_button],
         )
 
         check_tabs_button.click(
@@ -195,15 +243,30 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=status_box,
         )
 
+        new_chat_button.click(
+            fn=handle_new_chat,
+            inputs=None,
+            outputs=[
+                observable_box,
+                prompt_box,
+                status_box,
+                *history_buttons,
+                *history_run_states,
+            ],
+        )
+
+        for history_button, history_run_state in zip(history_buttons, history_run_states, strict=True):
+            history_button.click(
+                fn=handle_history_select,
+                inputs=history_run_state,
+                outputs=[status_box, observable_box, prompt_box],
+            )
+
         mode_radio.change(
-            fn=lambda mode: (
-                gr.update(visible=False),
-                gr.update(value=_welcome_markdown(), visible=True),
-            ),
+            fn=lambda mode: gr.update(visible=False),
             inputs=mode_radio,
             outputs=[
                 observable_box,
-                final_answer_box,
             ],
         )
 
@@ -220,7 +283,8 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=[
                 status_box,
                 observable_box,
-                final_answer_box,
+                *history_buttons,
+                *history_run_states,
             ],
         )
 
@@ -237,8 +301,15 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=[
                 status_box,
                 observable_box,
-                final_answer_box,
+                *history_buttons,
+                *history_run_states,
             ],
+        )
+
+        demo.load(
+            fn=lambda: _history_slot_updates(settings),
+            inputs=None,
+            outputs=[*history_buttons, *history_run_states],
         )
 
     return demo, theme, _custom_css()
@@ -291,6 +362,99 @@ def _connection_status_html(settings: dict, found: dict[str, str | None], messag
     return "\n".join(statuses)
 
 
+def _history_items(settings: dict) -> list[dict[str, Any]]:
+    return SQLiteStore(settings).list_chat_history(HISTORY_LIMIT)
+
+
+def _history_slot_updates(settings: dict) -> tuple[Any, ...]:
+    items = _history_items(settings)
+    button_updates = []
+    run_ids: list[str | None] = []
+    for index in range(HISTORY_LIMIT):
+        item = items[index] if index < len(items) else None
+        button_updates.append(
+            gr.update(
+                value=item["title"] if item else "",
+                visible=item is not None,
+            )
+        )
+        run_ids.append(item["run_id"] if item else None)
+    return (*button_updates, *run_ids)
+
+
+def _sidebar_state_style(is_open: bool) -> str:
+    if is_open:
+        return """
+<style>
+:root { --history-sidebar-width: 260px; }
+.sidebar-toggle-button { left: calc(var(--history-sidebar-width) + 18px) !important; }
+.topbar .brand { padding-left: 52px !important; }
+@media (max-width: 760px) {
+    :root { --history-sidebar-width: 220px; }
+    .sidebar-toggle-button { left: calc(var(--history-sidebar-width) + 12px) !important; }
+}
+</style>
+"""
+
+    return """
+<style>
+:root { --history-sidebar-width: 0px; }
+.history-sidebar {
+    transform: translateX(-110%) !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    border-right: 0 !important;
+}
+.sidebar-toggle-button { left: 18px !important; }
+.topbar .brand { padding-left: 52px !important; }
+.debate-view-toggle { left: 22px !important; }
+@media (max-width: 760px) {
+    :root { --history-sidebar-width: 0px; }
+    .sidebar-toggle-button { left: 12px !important; }
+    .debate-view-toggle { left: 12px !important; }
+}
+</style>
+"""
+
+
+def load_history_run(settings: dict, run_id: str | None) -> tuple[str, Any, Any, Any]:
+    if not run_id:
+        return (
+            _empty_status_markdown(),
+            gr.update(value="", visible=False),
+            gr.update(value=""),
+        )
+
+    store = SQLiteStore(settings)
+    detail = store.get_run_detail(run_id)
+    if detail is None:
+        return (
+            _message_panel("History unavailable", "This saved run could not be found."),
+            gr.update(value="", visible=False),
+            gr.update(value=""),
+        )
+
+    state = store.state_from_detail(detail)
+    selected_models = state.active_models or list(MODEL_ORDER)
+    if state.mode == "debate":
+        compare_html = _observable_board_html(settings, state, [], selected_models)
+        output_html = (
+            _debate_switcher_html(compare_html, _final_answer_html(state.final_answer), state.run_id)
+            if state.final_answer
+            else compare_html
+        )
+    else:
+        output_html = _normal_board_html(settings, state, selected_models)
+
+    return (
+        _history_status_html(detail["run"]),
+        gr.update(value=output_html, visible=True),
+        gr.update(value=state.user_prompt),
+    )
+
+
 async def run_debate(
     settings: dict,
     prompt: str,
@@ -299,11 +463,11 @@ async def run_debate(
     use_chatgpt: bool,
     use_gemini: bool,
     use_claude: bool,
-) -> tuple[str, Any, Any]:
+) -> tuple[Any, ...]:
     final_update = (
         "",
         gr.update(value="", visible=False),
-        gr.update(value="", visible=False),
+        *_history_slot_updates(settings),
     )
     async for update in run_debate_stream(
         settings,
@@ -335,7 +499,7 @@ async def run_debate_stream(
         yield (
             _message_panel("Prompt required", "Enter a prompt before running."),
             gr.update(value="", visible=False),
-            gr.update(value=_welcome_markdown(), visible=True),
+            *_history_slot_updates(settings),
         )
         return
 
@@ -344,7 +508,7 @@ async def run_debate_stream(
         yield (
             _message_panel("Model selection", f"Select at least {min_models} model{'' if min_models == 1 else 's'}."),
             gr.update(value="", visible=False),
-            gr.update(value=_welcome_markdown(), visible=True),
+            *_history_slot_updates(settings),
         )
         return
 
@@ -357,6 +521,7 @@ async def run_debate_stream(
         max_iterations=iteration_count,
         active_models=active_models,
     )
+    SQLiteStore(settings).save_run_summary(state, status="running")
 
     progress_messages = ["Normal run queued" if mode == "normal" else "Debate queued"]
     progress_queue: asyncio.Queue[tuple[str, DebateState | None]] = asyncio.Queue()
@@ -371,14 +536,14 @@ async def run_debate_stream(
         yield (
             _live_status_markdown(active_models, progress_messages, mode),
             gr.update(value=compare_html, visible=True),
-            gr.update(value="", visible=False),
+            *_history_slot_updates(settings),
         )
     else:
         compare_html = _normal_board_html(settings, state, active_models)
         yield (
             _live_status_markdown(active_models, progress_messages, mode),
             gr.update(value=compare_html, visible=True),
-            gr.update(value="", visible=False),
+            *_history_slot_updates(settings),
         )
 
     graph = DebateGraph(settings, progress_callback=on_progress)
@@ -411,22 +576,24 @@ async def run_debate_stream(
                         value=output_html,
                         visible=True,
                     ),
-                    gr.update(value="", visible=False),
+                    *_history_slot_updates(settings),
                 )
             else:
                 compare_html = _normal_board_html(settings, latest_state, active_models)
                 yield (
                     _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
                     gr.update(value=compare_html, visible=True),
-                    gr.update(value="", visible=False),
+                    *_history_slot_updates(settings),
                 )
 
         final_state = await task
     except Exception as exc:  # noqa: BLE001 - UI must show unexpected orchestration failures.
+        latest_state.errors.append(str(exc))
+        SQLiteStore(settings).save_run_summary(latest_state, status="failed")
         yield (
             _message_panel("Run failed", str(exc)),
             gr.update(value="", visible=False),
-            gr.update(value="", visible=False),
+            *_history_slot_updates(settings),
         )
         return
 
@@ -436,7 +603,7 @@ async def run_debate_stream(
         yield (
             status,
             gr.update(value=compare_html, visible=True),
-            gr.update(value="", visible=False),
+            *_history_slot_updates(settings),
         )
         return
 
@@ -445,7 +612,7 @@ async def run_debate_stream(
     yield (
         status,
         gr.update(value=_debate_switcher_html(compare_html, final_html, final_state.run_id), visible=True),
-        gr.update(value="", visible=False),
+        *_history_slot_updates(settings),
     )
 
 
@@ -474,6 +641,43 @@ def _status_markdown(state: DebateState) -> str:
         warnings = "".join(f"<li>{html.escape(error)}</li>" for error in state.errors)
         lines.append(f'<div class="warning-list"><strong>Warnings</strong><ul>{warnings}</ul></div>')
     return "\n".join(lines)
+
+
+def _history_status_html(run: dict[str, Any]) -> str:
+    return (
+        '<div class="status-grid">'
+        f'{_stat_card("Loaded", run.get("title") or "Saved chat")}'
+        f'{_stat_card("Mode", (run.get("mode") or "normal").title())}'
+        f'{_stat_card("Status", run.get("status") or "saved")}'
+        f'{_stat_card("Created", run.get("created_at") or "unknown")}'
+        "</div>"
+    )
+
+
+def _history_summary_html(detail: dict[str, Any]) -> str:
+    run = detail["run"]
+    prompt = html.escape(run.get("user_prompt") or "")
+    final_answer = clean_response_text(run.get("final_answer") or "")
+    errors = [turn.get("error") for turn in detail.get("turns", []) if turn.get("error")]
+    parts = [
+        '<section class="history-loaded-summary">',
+        "<h2>Saved chat</h2>",
+        '<p class="eyebrow">Original prompt</p>',
+        f"<blockquote>{prompt}</blockquote>",
+    ]
+    if final_answer:
+        parts.extend(
+            [
+                '<p class="eyebrow">Final answer</p>',
+                _markdown_fragment_to_html(final_answer),
+            ]
+        )
+    if errors:
+        parts.append('<div class="warning-list"><strong>Errors</strong><ul>')
+        parts.extend(f"<li>{html.escape(error or '')}</li>" for error in errors)
+        parts.append("</ul></div>")
+    parts.append("</section>")
+    return "\n".join(parts)
 
 
 def _live_status_markdown(active_models: list[str], messages: list[str], mode: str) -> str:
@@ -819,6 +1023,7 @@ def _custom_css() -> str:
     --cai-warn-text: #fed7aa;
     --cai-topbar-height: 96px;
     --cai-composer-height: 138px;
+    --history-sidebar-width: 260px;
 }
 
 html,
@@ -853,15 +1058,217 @@ footer { display: none !important; visibility: hidden !important; }
     min-height: 100vh !important;
     padding: 0 !important;
     background: var(--cai-bg) !important;
+    overflow: visible !important;
+}
+.sidebar-state-style {
+    display: none !important;
+}
+.sidebar-toggle-button,
+.sidebar-toggle-button button {
+    position: fixed !important;
+    top: 18px !important;
+    z-index: 130 !important;
+    width: 40px !important;
+    min-width: 40px !important;
+    height: 40px !important;
+    min-height: 40px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    color: var(--cai-text) !important;
+    background: #181818 !important;
+    border: 1px solid #343434 !important;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38) !important;
+    font-size: 13px !important;
+    font-weight: 800 !important;
+    line-height: 1 !important;
+}
+.sidebar-toggle-button:hover,
+.sidebar-toggle-button button:hover {
+    background: #242424 !important;
+    border-color: #4a4a4a !important;
+}
+
+/* --- Row that holds sidebar + main --- */
+.council-layout {
+    min-width: 0 !important;
+    flex-wrap: nowrap !important;
+    overflow: visible !important;
+    height: 100vh !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    gap: 0 !important;
+    padding: 0 !important;
+}
+.main-chat-area {
+    min-width: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+/* --- Fixed left sidebar --- */
+.history-sidebar {
+    position: fixed !important;
+    left: 0 !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    z-index: 90 !important;
+    width: var(--history-sidebar-width) !important;
+    min-width: var(--history-sidebar-width) !important;
+    max-width: var(--history-sidebar-width) !important;
+    height: 100vh !important;
+    flex: 0 0 var(--history-sidebar-width) !important;
+    padding: 14px 10px !important;
+    background: #0f0f0f !important;
+    border-right: 1px solid #202020 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+.history-sidebar,
+.history-sidebar * {
+    color: var(--cai-text) !important;
+}
+/* Override all Gradio internal wrappers inside the sidebar */
+.history-sidebar > .wrap,
+.history-sidebar > .column-wrap,
+.history-sidebar .wrap,
+.history-sidebar .form,
+.history-sidebar .block,
+.history-sidebar [class*="wrap"],
+.history-sidebar [class*="block"] {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    min-height: 0 !important;
+    height: auto !important;
+    flex: 1 1 auto !important;
+}
+/* But the sidebar root itself needs fixed height */
+.history-sidebar {
+    height: 100vh !important;
+}
+.history-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 42px;
+    margin: auto 4px 2px;
+    padding-top: 14px;
+    border-top: 1px solid #202020;
+    flex-shrink: 0;
+}
+.history-brand h2 {
+    color: var(--cai-text) !important;
+    font-size: 17px !important;
+    line-height: 1.15 !important;
+    margin: 0 !important;
+}
+.history-brand p {
+    color: var(--cai-muted) !important;
+    font-size: 11px !important;
+    line-height: 1.2 !important;
+    margin: 2px 0 0 !important;
+}
+.history-new-chat,
+.history-new-chat button {
+    width: 100% !important;
+    min-height: 42px !important;
+    border-radius: 10px !important;
+    color: var(--cai-text) !important;
+    background: #1b1b1b !important;
+    border: 1px solid #303030 !important;
+    font-size: 14px !important;
+    font-weight: 650 !important;
+    flex-shrink: 0 !important;
+    margin-bottom: 6px !important;
+}
+.history-new-chat:hover,
+.history-new-chat button:hover {
+    background: #242424 !important;
+    border-color: #3a3a3a !important;
+}
+
+/* --- Scrollable history list inside sidebar --- */
+.history-list {
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    margin-top: 10px !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    scrollbar-color: #383838 #0f0f0f;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+    padding: 0 !important;
+}
+/* Gradio wraps Column children in an inner div — make it scrollable too */
+.history-list > .wrap,
+.history-list > .column-wrap,
+.history-list > [class*="wrap"] {
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+    scrollbar-color: #383838 #0f0f0f;
+}
+.history-list .history-item,
+.history-list .history-item button,
+.history-item,
+.history-item button {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    width: 100% !important;
+    min-height: 34px !important;
+    margin: 0 !important;
+    padding: 0 10px !important;
+    border-radius: 9px !important;
+    color: #d9d9d9 !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    font-size: 13px !important;
+    line-height: 1.25 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    cursor: pointer !important;
+    flex-shrink: 0 !important;
+}
+.history-list .history-item:hover,
+.history-list .history-item:hover button,
+.history-item:hover,
+.history-item:hover button {
+    background: #1c1c1c !important;
+}
+.history-item-active {
+    color: var(--cai-text) !important;
+    background: #242424 !important;
+    border-color: #333333 !important;
+}
+.main-chat-area {
+    margin-left: var(--history-sidebar-width) !important;
+    width: calc(100vw - var(--history-sidebar-width)) !important;
 }
 
 .topbar {
     position: fixed;
     top: 0;
-    left: 0;
+    left: var(--history-sidebar-width);
     right: 0;
     z-index: 70;
-    width: 100% !important;
+    width: calc(100% - var(--history-sidebar-width)) !important;
     min-height: var(--cai-topbar-height);
     margin: 0 !important;
     padding: 12px 28px !important;
@@ -924,12 +1331,12 @@ footer { display: none !important; visibility: hidden !important; }
 }
 .answer-shell {
     position: fixed;
-    left: 0;
+    left: var(--history-sidebar-width);
     right: 0;
     top: var(--cai-topbar-height);
     bottom: var(--cai-composer-height);
     z-index: 1;
-    width: 100% !important;
+    width: calc(100% - var(--history-sidebar-width)) !important;
     min-height: 0 !important;
     margin: 0 !important;
     padding: 26px 18px 70px !important;
@@ -943,7 +1350,7 @@ footer { display: none !important; visibility: hidden !important; }
 .answer-shell::after {
     content: "";
     position: fixed;
-    left: 0;
+    left: var(--history-sidebar-width);
     right: 0;
     bottom: var(--cai-composer-height);
     height: 86px;
@@ -967,6 +1374,18 @@ footer { display: none !important; visibility: hidden !important; }
     border: 0 !important;
     box-shadow: none !important;
     color: var(--cai-text) !important;
+}
+.history-loaded-summary {
+    color: var(--cai-text);
+}
+.history-loaded-summary blockquote {
+    margin: 10px 0 24px !important;
+    padding: 12px 14px !important;
+    color: #e6e6e6 !important;
+    background: #151515 !important;
+    border: 1px solid #2f2f2f !important;
+    border-left: 3px solid #666666 !important;
+    border-radius: 10px !important;
 }
 .final-answer-box {
     max-width: 960px;
@@ -1360,13 +1779,13 @@ details > *:not(summary) {
 
 .composer-shell {
     position: fixed;
-    left: 0;
+    left: var(--history-sidebar-width);
     right: 0;
     bottom: 0;
     z-index: 60;
     display: flex;
     align-items: center;
-    width: 100% !important;
+    width: calc(100% - var(--history-sidebar-width)) !important;
     padding: 8px 18px 8px !important;
     background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,0.92) 34%, #000 100%) !important;
     border: 0 !important;
@@ -1500,7 +1919,7 @@ button.primary.execute-button * {
 }
 .debate-view-toggle {
     position: fixed !important;
-    left: 22px !important;
+    left: calc(var(--history-sidebar-width) + 22px) !important;
     bottom: 92px !important;
     z-index: 80 !important;
     min-width: 88px !important;
@@ -1682,6 +2101,7 @@ button.primary.execute-button * {
     :root {
         --cai-topbar-height: 96px;
         --cai-composer-height: 138px;
+        --history-sidebar-width: 220px;
     }
     .answer-shell {
         padding: 20px 14px 66px !important;
@@ -1710,7 +2130,7 @@ button.primary.execute-button * {
         font-size: 14px;
     }
     .debate-view-toggle {
-        left: 12px !important;
+        left: calc(var(--history-sidebar-width) + 12px) !important;
         bottom: 142px !important;
         width: 76px !important;
         min-width: 76px !important;

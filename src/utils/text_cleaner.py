@@ -19,6 +19,14 @@ _INTERNAL_PROMPT_PATTERNS = [
 ]
 
 _MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*]\([^)]*\)")
+_MODEL_PREFIX_LINE_PATTERN = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(?:gemini\s+(?:said|says)|claude\s+responded)(?:\*\*)?\s*:?\s*$",
+    re.IGNORECASE,
+)
+_MODEL_PREFIX_INLINE_PATTERN = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(?:gemini\s+(?:said|says)|claude\s+responded)(?:\*\*)?\s*:\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def clean_response_text(text: str) -> str:
@@ -29,6 +37,12 @@ def clean_response_text(text: str) -> str:
         if any(re.match(pattern, stripped, re.IGNORECASE) for pattern in _ARTIFACT_PATTERNS):
             continue
         if any(re.match(pattern, stripped, re.IGNORECASE) for pattern in _INTERNAL_PROMPT_PATTERNS):
+            continue
+        if _MODEL_PREFIX_LINE_PATTERN.match(stripped):
+            continue
+        inline_prefix = _MODEL_PREFIX_INLINE_PATTERN.match(line)
+        if inline_prefix:
+            lines.append(inline_prefix.group(1).rstrip())
             continue
         lines.append(line.rstrip())
 
