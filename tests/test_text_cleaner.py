@@ -22,6 +22,12 @@ def test_clean_response_text_removes_model_self_prefixes() -> None:
     assert clean_response_text("Claude responded: Hey there") == "Hey there"
 
 
+def test_clean_response_text_removes_duplicate_leading_title() -> None:
+    text = '"Yo" vs "Wassup" - A Breakdown\n\n## "Yo" vs "Wassup" - A Breakdown\n\nAnswer'
+
+    assert clean_response_text(text) == '## "Yo" vs "Wassup" - A Breakdown\n\nAnswer'
+
+
 def test_clean_response_html_preserves_tables_as_markdown() -> None:
     markup = """
     <div>

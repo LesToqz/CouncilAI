@@ -41,6 +41,7 @@ class SQLiteStore:
                 """
                 CREATE TABLE IF NOT EXISTS runs(
                     id TEXT PRIMARY KEY,
+                    chat_id TEXT,
                     created_at TEXT,
                     user_prompt TEXT,
                     mode TEXT,
@@ -53,11 +54,24 @@ class SQLiteStore:
                 )
                 """
             )
+            self._add_column_if_missing(conn, "runs", "chat_id", "TEXT")
             self._add_column_if_missing(conn, "runs", "title", "TEXT")
             self._add_column_if_missing(conn, "runs", "status", "TEXT")
             self._add_column_if_missing(conn, "runs", "updated_at", "TEXT")
             self._add_column_if_missing(conn, "runs", "metadata_json", "TEXT")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chats(
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    metadata_json TEXT
+                )
+                """
+            )
             self._backfill_run_summaries(conn)
+            self._backfill_chats(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turns(
@@ -74,6 +88,8 @@ class SQLiteStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_updated_at ON runs(updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_chat_id ON runs(chat_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_run_id ON turns(run_id)")
 
     def save(self, state: DebateState) -> None:
@@ -86,6 +102,8 @@ class SQLiteStore:
         self.ensure_schema()
         updated_at = utc_now_iso()
         run_status = status or self._status_for_state(state)
+        chat_id = state.chat_id or state.run_id
+        state.chat_id = chat_id
         metadata = {
             "active_models": state.active_models,
             "current_iteration": state.current_iteration,
@@ -94,13 +112,40 @@ class SQLiteStore:
         with self._connect() as conn:
             conn.execute(
                 """
+                INSERT OR IGNORE INTO chats(id, title, created_at, updated_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    generate_title_from_prompt(state.user_prompt),
+                    state.created_at,
+                    updated_at,
+                    None,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE chats
+                SET updated_at = ?,
+                    title = COALESCE(NULLIF(title, ''), ?)
+                WHERE id = ?
+                """,
+                (
+                    updated_at,
+                    generate_title_from_prompt(state.user_prompt),
+                    chat_id,
+                ),
+            )
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO runs(
-                    id, created_at, user_prompt, mode, max_iterations, final_answer,
+                    id, chat_id, created_at, user_prompt, mode, max_iterations, final_answer,
                     title, status, updated_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     state.run_id,
+                    chat_id,
                     state.created_at,
                     state.user_prompt,
                     state.mode,
@@ -143,15 +188,32 @@ class SQLiteStore:
             rows = conn.execute(
                 """
                 SELECT
-                    id AS run_id,
-                    COALESCE(NULLIF(title, ''), user_prompt, 'Untitled chat') AS title,
-                    user_prompt,
-                    mode,
-                    status,
-                    created_at,
-                    updated_at
-                FROM runs
-                ORDER BY COALESCE(updated_at, created_at) DESC
+                    chats.id AS chat_id,
+                    chats.id AS run_id,
+                    COALESCE(NULLIF(chats.title, ''), 'Untitled chat') AS title,
+                    first_run.user_prompt,
+                    latest_run.mode,
+                    latest_run.status,
+                    chats.created_at,
+                    chats.updated_at
+                FROM chats
+                LEFT JOIN runs AS first_run
+                    ON first_run.id = (
+                        SELECT id
+                        FROM runs
+                        WHERE runs.chat_id = chats.id
+                        ORDER BY COALESCE(created_at, ''), rowid
+                        LIMIT 1
+                    )
+                LEFT JOIN runs AS latest_run
+                    ON latest_run.id = (
+                        SELECT id
+                        FROM runs
+                        WHERE runs.chat_id = chats.id
+                        ORDER BY COALESCE(updated_at, created_at, '') DESC, rowid DESC
+                        LIMIT 1
+                    )
+                ORDER BY COALESCE(chats.updated_at, chats.created_at) DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -168,6 +230,7 @@ class SQLiteStore:
                 """
                 SELECT
                     id AS run_id,
+                    chat_id,
                     COALESCE(NULLIF(title, ''), user_prompt, 'Untitled chat') AS title,
                     user_prompt,
                     final_answer,
@@ -210,6 +273,82 @@ class SQLiteStore:
             "turns": [dict(turn) for turn in turns],
         }
 
+    def get_chat_detail(self, chat_id: str) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+
+        self.ensure_schema()
+        with self._connect() as conn:
+            chat = conn.execute(
+                """
+                SELECT
+                    id AS chat_id,
+                    title,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM chats
+                WHERE id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            if chat is None:
+                return None
+
+            runs = conn.execute(
+                """
+                SELECT
+                    id AS run_id,
+                    chat_id,
+                    COALESCE(NULLIF(title, ''), user_prompt, 'Untitled chat') AS title,
+                    user_prompt,
+                    final_answer,
+                    mode,
+                    max_iterations,
+                    status,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM runs
+                WHERE chat_id = ?
+                ORDER BY COALESCE(created_at, ''), rowid
+                """,
+                (chat_id,),
+            ).fetchall()
+
+            run_details = []
+            for run in runs:
+                turns = conn.execute(
+                    """
+                    SELECT
+                        id AS turn_id,
+                        run_id,
+                        model AS model_name,
+                        model,
+                        iteration,
+                        phase,
+                        prompt,
+                        response,
+                        error,
+                        created_at
+                    FROM turns
+                    WHERE run_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (run["run_id"],),
+                ).fetchall()
+                run_details.append(
+                    {
+                        "run": dict(run),
+                        "turns": [dict(turn) for turn in turns],
+                    }
+                )
+
+        return {
+            "chat": dict(chat),
+            "runs": run_details,
+        }
+
     def delete_run(self, run_id: str) -> None:
         if not self.enabled:
             return
@@ -217,7 +356,26 @@ class SQLiteStore:
         self.ensure_schema()
         with self._connect() as conn:
             conn.execute("DELETE FROM turns WHERE run_id = ?", (run_id,))
+            run = conn.execute("SELECT chat_id FROM runs WHERE id = ?", (run_id,)).fetchone()
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+            if run and run["chat_id"]:
+                remaining = conn.execute("SELECT 1 FROM runs WHERE chat_id = ? LIMIT 1", (run["chat_id"],)).fetchone()
+                if remaining is None:
+                    conn.execute("DELETE FROM chats WHERE id = ?", (run["chat_id"],))
+
+    def delete_chat(self, chat_id: str) -> None:
+        if not self.enabled:
+            return
+
+        self.ensure_schema()
+        with self._connect() as conn:
+            run_rows = conn.execute("SELECT id FROM runs WHERE chat_id = ?", (chat_id,)).fetchall()
+            run_ids = [row["id"] for row in run_rows]
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                conn.execute(f"DELETE FROM turns WHERE run_id IN ({placeholders})", run_ids)
+            conn.execute("DELETE FROM runs WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
 
     def state_from_detail(self, detail: dict[str, Any]) -> DebateState:
         run = detail["run"]
@@ -247,6 +405,7 @@ class SQLiteStore:
         errors = [f"{turn.model} {turn.phase}: {turn.error}" for turn in turns if turn.error]
         return DebateState(
             run_id=run["run_id"],
+            chat_id=run["chat_id"] or run["run_id"],
             created_at=run["created_at"] or utc_now_iso(),
             user_prompt=run["user_prompt"] or "",
             mode=mode,
@@ -290,4 +449,38 @@ class SQLiteStore:
                     utc_now_iso(),
                     row["id"],
                 ),
+            )
+
+    def _backfill_chats(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, chat_id, user_prompt, created_at, title, updated_at
+            FROM runs
+            ORDER BY COALESCE(created_at, ''), rowid
+            """
+        ).fetchall()
+        for row in rows:
+            chat_id = row["chat_id"] or row["id"]
+            created_at = row["created_at"] or utc_now_iso()
+            updated_at = row["updated_at"] or created_at
+            title = row["title"] or generate_title_from_prompt(row["user_prompt"] or "")
+            if not row["chat_id"]:
+                conn.execute("UPDATE runs SET chat_id = ? WHERE id = ?", (chat_id, row["id"]))
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO chats(id, title, created_at, updated_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chat_id, title, created_at, updated_at, None),
+            )
+            conn.execute(
+                """
+                UPDATE chats
+                SET updated_at = CASE
+                        WHEN COALESCE(updated_at, '') < ? THEN ?
+                        ELSE updated_at
+                    END
+                WHERE id = ?
+                """,
+                (updated_at, updated_at, chat_id),
             )

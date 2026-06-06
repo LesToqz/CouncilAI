@@ -48,7 +48,7 @@ def clean_response_text(text: str) -> str:
 
     cleaned = "\n".join(lines).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned
+    return _remove_duplicate_leading_title(cleaned)
 
 
 def clean_response_html(markup: str) -> str:
@@ -69,3 +69,40 @@ def clean_response_html(markup: str) -> str:
         strip=["canvas", "form", "input", "textarea"],
     )
     return clean_response_text(markdown)
+
+
+def _remove_duplicate_leading_title(text: str) -> str:
+    lines = text.splitlines()
+    non_empty_indexes = [index for index, line in enumerate(lines) if line.strip()]
+    if len(non_empty_indexes) < 2:
+        return text
+
+    first_index, second_index = non_empty_indexes[:2]
+    first = lines[first_index]
+    second = lines[second_index]
+    if _normalized_title_line(first) != _normalized_title_line(second):
+        return text
+
+    first_score = _title_format_score(first)
+    second_score = _title_format_score(second)
+    remove_index = first_index if second_score > first_score else second_index
+    del lines[remove_index]
+    cleaned = "\n".join(lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+def _normalized_title_line(line: str) -> str:
+    normalized = line.strip()
+    normalized = re.sub(r"^#{1,6}\s+", "", normalized)
+    normalized = re.sub(r"^\*\*(.+?)\*\*$", r"\1", normalized)
+    normalized = re.sub(r"^__(.+?)__$", r"\1", normalized)
+    return " ".join(normalized.split()).casefold()
+
+
+def _title_format_score(line: str) -> int:
+    stripped = line.strip()
+    if re.match(r"^#{1,6}\s+", stripped):
+        return 3
+    if re.match(r"^(?:\*\*|__).+(?:\*\*|__)$", stripped):
+        return 2
+    return 1

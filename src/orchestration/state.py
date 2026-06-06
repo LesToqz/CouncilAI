@@ -19,6 +19,7 @@ class ModelTurn(BaseModel):
 
 class DebateState(BaseModel):
     run_id: str = Field(default_factory=lambda: str(uuid4()))
+    chat_id: str | None = None
     created_at: str = Field(default_factory=utc_now_iso)
     user_prompt: str
     mode: Literal["normal", "debate"]

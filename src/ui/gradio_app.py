@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import re
+from pathlib import Path
 from typing import Any
 
 import gradio as gr
@@ -44,6 +46,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
 
     async def handle_run(
         prompt: str,
+        current_chat_id: str,
         mode: str,
         iterations: float,
         use_chatgpt: bool,
@@ -53,6 +56,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
         async for update in run_debate_stream(
             settings,
             prompt,
+            current_chat_id,
             mode,
             iterations,
             use_chatgpt,
@@ -66,11 +70,69 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             gr.update(value="", visible=False),
             gr.update(value=""),
             _empty_status_markdown(),
+            gr.update(value="final", visible=False),
+            "compare",
+            "",
+            "",
+            "",
+            "",
             *_history_slot_updates(settings),
         )
 
-    def handle_history_select(run_id: str | None) -> tuple[str, Any, Any]:
+    def handle_history_select(run_id: str | None) -> tuple[str, Any, Any, Any, str, str, str, str, str]:
         return load_history_run(settings, run_id)
+
+    def handle_history_delete(chat_id: str | None, current_chat_id: str | None) -> tuple[Any, ...]:
+        if chat_id:
+            SQLiteStore(settings).delete_chat(chat_id)
+
+        if chat_id and chat_id == current_chat_id:
+            return (
+                gr.update(value="", visible=False),
+                gr.update(value=""),
+                _empty_status_markdown(),
+                gr.update(value="final", visible=False),
+                "compare",
+                "",
+                "",
+                "",
+                "",
+                *_history_slot_updates(settings),
+            )
+
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            current_chat_id or "",
+            *_history_slot_updates(settings),
+        )
+
+    def handle_view_toggle(
+        current_view: str,
+        compare_html: str,
+        final_html: str,
+    ) -> tuple[str, Any, Any]:
+        if not final_html:
+            return (
+                "compare",
+                gr.update(value=compare_html, visible=bool(compare_html)),
+                gr.update(value="final", visible=False),
+            )
+
+        next_view = "final" if current_view != "final" else "compare"
+        next_html = final_html if next_view == "final" else compare_html
+        next_label = "compare" if next_view == "final" else "final"
+        return (
+            next_view,
+            gr.update(value=next_html, visible=True),
+            gr.update(value=next_label, visible=False),
+        )
 
     def toggle_options(is_open: bool) -> tuple[bool, Any, Any]:
         next_open = not bool(is_open)
@@ -98,8 +160,15 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
     with gr.Blocks(title=app_name, elem_id="council-shell") as demo:
         drawer_open = gr.State(False)
         sidebar_open = gr.State(True)
+        current_view_state = gr.State("compare")
+        compare_html_state = gr.State("")
+        final_html_state = gr.State("")
+        submitted_prompt_state = gr.State("")
+        current_chat_id_state = gr.State("")
         initial_history = _history_items(settings)
+        history_rows = []
         history_buttons = []
+        history_delete_buttons = []
         history_run_states = []
         sidebar_state_style = gr.HTML(
             value=_sidebar_state_style(True),
@@ -114,13 +183,30 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                     for index in range(HISTORY_LIMIT):
                         history_item = initial_history[index] if index < len(initial_history) else None
                         history_run_states.append(gr.State(history_item["run_id"] if history_item else None))
-                        history_buttons.append(
-                            gr.Button(
-                                history_item["title"] if history_item else "",
-                                visible=history_item is not None,
-                                elem_classes=["history-item"],
+                        with gr.Row(
+                            equal_height=True,
+                            visible=history_item is not None,
+                            elem_classes=["history-row"],
+                        ) as history_row:
+                            history_rows.append(history_row)
+                            history_buttons.append(
+                                gr.Button(
+                                    history_item["title"] if history_item else "",
+                                    visible=history_item is not None,
+                                    scale=1,
+                                    min_width=0,
+                                    elem_classes=["history-item"],
+                                )
                             )
-                        )
+                            history_delete_buttons.append(
+                                gr.Button(
+                                    "x",
+                                    visible=history_item is not None,
+                                    scale=0,
+                                    min_width=28,
+                                    elem_classes=["history-delete"],
+                                )
+                            )
 
             with gr.Column(elem_classes=["main-chat-area"]):
                 with gr.Row(elem_classes=["topbar"]):
@@ -195,6 +281,11 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
 
                     with gr.Row(elem_classes=["composer-bar"]):
                         plus_button = gr.Button("+", elem_classes=["composer-icon-button"])
+                        view_toggle_button = gr.Button(
+                            "final",
+                            visible=False,
+                            elem_classes=["prompt-view-toggle"],
+                        )
                         prompt_box = gr.Textbox(
                             label="Prompt",
                             lines=1,
@@ -250,7 +341,15 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                 observable_box,
                 prompt_box,
                 status_box,
+                view_toggle_button,
+                current_view_state,
+                compare_html_state,
+                final_html_state,
+                submitted_prompt_state,
+                current_chat_id_state,
+                *history_rows,
                 *history_buttons,
+                *history_delete_buttons,
                 *history_run_states,
             ],
         )
@@ -259,14 +358,71 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             history_button.click(
                 fn=handle_history_select,
                 inputs=history_run_state,
-                outputs=[status_box, observable_box, prompt_box],
+                outputs=[
+                    status_box,
+                    observable_box,
+                    prompt_box,
+                    view_toggle_button,
+                    current_view_state,
+                    compare_html_state,
+                    final_html_state,
+                    submitted_prompt_state,
+                    current_chat_id_state,
+                ],
+            )
+
+        for history_delete_button, history_run_state in zip(history_delete_buttons, history_run_states, strict=True):
+            history_delete_button.click(
+                fn=handle_history_delete,
+                inputs=[history_run_state, current_chat_id_state],
+                outputs=[
+                    observable_box,
+                    prompt_box,
+                    status_box,
+                    view_toggle_button,
+                    current_view_state,
+                    compare_html_state,
+                    final_html_state,
+                    submitted_prompt_state,
+                    current_chat_id_state,
+                    *history_rows,
+                    *history_buttons,
+                    *history_delete_buttons,
+                    *history_run_states,
+                ],
             )
 
         mode_radio.change(
-            fn=lambda mode: gr.update(visible=False),
+            fn=lambda mode: (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+            ),
             inputs=mode_radio,
             outputs=[
                 observable_box,
+                view_toggle_button,
+                current_view_state,
+                compare_html_state,
+                final_html_state,
+                submitted_prompt_state,
+            ],
+        )
+
+        view_toggle_button.click(
+            fn=handle_view_toggle,
+            inputs=[
+                current_view_state,
+                compare_html_state,
+                final_html_state,
+            ],
+            outputs=[
+                current_view_state,
+                observable_box,
+                view_toggle_button,
             ],
         )
 
@@ -274,6 +430,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             fn=handle_run,
             inputs=[
                 prompt_box,
+                current_chat_id_state,
                 mode_radio,
                 iterations_slider,
                 chatgpt_checkbox,
@@ -283,7 +440,16 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=[
                 status_box,
                 observable_box,
+                prompt_box,
+                view_toggle_button,
+                current_view_state,
+                compare_html_state,
+                final_html_state,
+                submitted_prompt_state,
+                current_chat_id_state,
+                *history_rows,
                 *history_buttons,
+                *history_delete_buttons,
                 *history_run_states,
             ],
         )
@@ -292,6 +458,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             fn=handle_run,
             inputs=[
                 prompt_box,
+                current_chat_id_state,
                 mode_radio,
                 iterations_slider,
                 chatgpt_checkbox,
@@ -301,7 +468,16 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
             outputs=[
                 status_box,
                 observable_box,
+                prompt_box,
+                view_toggle_button,
+                current_view_state,
+                compare_html_state,
+                final_html_state,
+                submitted_prompt_state,
+                current_chat_id_state,
+                *history_rows,
                 *history_buttons,
+                *history_delete_buttons,
                 *history_run_states,
             ],
         )
@@ -309,7 +485,7 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
         demo.load(
             fn=lambda: _history_slot_updates(settings),
             inputs=None,
-            outputs=[*history_buttons, *history_run_states],
+            outputs=[*history_rows, *history_buttons, *history_delete_buttons, *history_run_states],
         )
 
     return demo, theme, _custom_css()
@@ -368,18 +544,22 @@ def _history_items(settings: dict) -> list[dict[str, Any]]:
 
 def _history_slot_updates(settings: dict) -> tuple[Any, ...]:
     items = _history_items(settings)
+    row_updates = []
     button_updates = []
+    delete_button_updates = []
     run_ids: list[str | None] = []
     for index in range(HISTORY_LIMIT):
         item = items[index] if index < len(items) else None
+        row_updates.append(gr.update(visible=item is not None))
         button_updates.append(
             gr.update(
                 value=item["title"] if item else "",
                 visible=item is not None,
             )
         )
-        run_ids.append(item["run_id"] if item else None)
-    return (*button_updates, *run_ids)
+        delete_button_updates.append(gr.update(visible=item is not None))
+        run_ids.append(item["chat_id"] if item else None)
+    return (*row_updates, *button_updates, *delete_button_updates, *run_ids)
 
 
 def _sidebar_state_style(is_open: bool) -> str:
@@ -409,55 +589,62 @@ def _sidebar_state_style(is_open: bool) -> str:
 }
 .sidebar-toggle-button { left: 18px !important; }
 .topbar .brand { padding-left: 52px !important; }
-.debate-view-toggle { left: 22px !important; }
 @media (max-width: 760px) {
     :root { --history-sidebar-width: 0px; }
     .sidebar-toggle-button { left: 12px !important; }
-    .debate-view-toggle { left: 12px !important; }
 }
 </style>
 """
 
 
-def load_history_run(settings: dict, run_id: str | None) -> tuple[str, Any, Any, Any]:
-    if not run_id:
+def load_history_run(settings: dict, chat_id: str | None) -> tuple[str, Any, Any, Any, str, str, str, str, str]:
+    if not chat_id:
         return (
             _empty_status_markdown(),
             gr.update(value="", visible=False),
             gr.update(value=""),
+            gr.update(value="final", visible=False),
+            "compare",
+            "",
+            "",
+            "",
+            "",
         )
 
     store = SQLiteStore(settings)
-    detail = store.get_run_detail(run_id)
+    detail = store.get_chat_detail(chat_id)
     if detail is None:
         return (
             _message_panel("History unavailable", "This saved run could not be found."),
             gr.update(value="", visible=False),
             gr.update(value=""),
+            gr.update(value="final", visible=False),
+            "compare",
+            "",
+            "",
+            "",
+            "",
         )
 
-    state = store.state_from_detail(detail)
-    selected_models = state.active_models or list(MODEL_ORDER)
-    if state.mode == "debate":
-        compare_html = _observable_board_html(settings, state, [], selected_models)
-        output_html = (
-            _debate_switcher_html(compare_html, _final_answer_html(state.final_answer), state.run_id)
-            if state.final_answer
-            else compare_html
-        )
-    else:
-        output_html = _normal_board_html(settings, state, selected_models)
+    compare_html, final_html, toggle_visible, submitted_prompt = _chat_transcript_views(settings, detail)
 
     return (
-        _history_status_html(detail["run"]),
-        gr.update(value=output_html, visible=True),
-        gr.update(value=state.user_prompt),
+        _chat_status_html(detail),
+        gr.update(value=compare_html, visible=bool(compare_html)),
+        gr.update(value=""),
+        gr.update(value="final", visible=False),
+        "compare",
+        compare_html,
+        final_html,
+        submitted_prompt,
+        chat_id,
     )
 
 
 async def run_debate(
     settings: dict,
     prompt: str,
+    current_chat_id: str,
     mode_label: str,
     iterations: float,
     use_chatgpt: bool,
@@ -467,11 +654,19 @@ async def run_debate(
     final_update = (
         "",
         gr.update(value="", visible=False),
+        gr.update(),
+        gr.update(value="final", visible=False),
+        "compare",
+        "",
+        "",
+        "",
+        current_chat_id,
         *_history_slot_updates(settings),
     )
     async for update in run_debate_stream(
         settings,
         prompt,
+        current_chat_id,
         mode_label,
         iterations,
         use_chatgpt,
@@ -485,6 +680,7 @@ async def run_debate(
 async def run_debate_stream(
     settings: dict,
     prompt: str,
+    current_chat_id: str,
     mode_label: str,
     iterations: float,
     use_chatgpt: bool,
@@ -499,6 +695,13 @@ async def run_debate_stream(
         yield (
             _message_panel("Prompt required", "Enter a prompt before running."),
             gr.update(value="", visible=False),
+            gr.update(),
+            gr.update(value="final", visible=False),
+            "compare",
+            "",
+            "",
+            "",
+            current_chat_id,
             *_history_slot_updates(settings),
         )
         return
@@ -508,6 +711,13 @@ async def run_debate_stream(
         yield (
             _message_panel("Model selection", f"Select at least {min_models} model{'' if min_models == 1 else 's'}."),
             gr.update(value="", visible=False),
+            gr.update(),
+            gr.update(value="final", visible=False),
+            "compare",
+            "",
+            "",
+            "",
+            current_chat_id,
             *_history_slot_updates(settings),
         )
         return
@@ -521,7 +731,14 @@ async def run_debate_stream(
         max_iterations=iteration_count,
         active_models=active_models,
     )
-    SQLiteStore(settings).save_run_summary(state, status="running")
+    state.chat_id = current_chat_id or state.run_id
+    store = SQLiteStore(settings)
+    previous_blocks_html = ""
+    if current_chat_id:
+        previous_detail = store.get_chat_detail(current_chat_id)
+        if previous_detail is not None:
+            previous_blocks_html = _chat_run_blocks_html(settings, previous_detail)
+    store.save_run_summary(state, status="running")
 
     progress_messages = ["Normal run queued" if mode == "normal" else "Debate queued"]
     progress_queue: asyncio.Queue[tuple[str, DebateState | None]] = asyncio.Queue()
@@ -533,17 +750,29 @@ async def run_debate_stream(
 
     if mode == "debate":
         compare_html = _observable_board_html(settings, state, progress_messages, active_models)
-        yield (
+        yield _run_stream_update(
+            settings,
             _live_status_markdown(active_models, progress_messages, mode),
-            gr.update(value=compare_html, visible=True),
-            *_history_slot_updates(settings),
+            compare_html,
+            prompt,
+            clear_prompt=True,
+            compare_html=compare_html,
+            chat_id=state.chat_id or state.run_id,
+            previous_blocks_html=previous_blocks_html,
+            run_id=state.run_id,
         )
     else:
         compare_html = _normal_board_html(settings, state, active_models)
-        yield (
+        yield _run_stream_update(
+            settings,
             _live_status_markdown(active_models, progress_messages, mode),
-            gr.update(value=compare_html, visible=True),
-            *_history_slot_updates(settings),
+            compare_html,
+            prompt,
+            clear_prompt=True,
+            compare_html=compare_html,
+            chat_id=state.chat_id or state.run_id,
+            previous_blocks_html=previous_blocks_html,
+            run_id=state.run_id,
         )
 
     graph = DebateGraph(settings, progress_callback=on_progress)
@@ -561,57 +790,118 @@ async def run_debate_stream(
 
             if mode == "debate":
                 compare_html = _observable_board_html(settings, latest_state, progress_messages, active_models)
-                output_html = (
-                    _debate_switcher_html(
-                        compare_html,
-                        _final_answer_html(latest_state.final_answer),
-                        latest_state.run_id,
-                    )
-                    if latest_state.final_answer
-                    else compare_html
-                )
-                yield (
+                final_html = _final_answer_html(latest_state.final_answer) if latest_state.final_answer else ""
+                yield _run_stream_update(
+                    settings,
                     _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
-                    gr.update(
-                        value=output_html,
-                        visible=True,
-                    ),
-                    *_history_slot_updates(settings),
+                    compare_html,
+                    latest_state.user_prompt,
+                    clear_prompt=True,
+                    toggle_visible=bool(final_html),
+                    compare_html=compare_html,
+                    final_html=final_html,
+                    chat_id=latest_state.chat_id or state.chat_id or state.run_id,
+                    previous_blocks_html=previous_blocks_html,
+                    run_id=latest_state.run_id,
                 )
             else:
                 compare_html = _normal_board_html(settings, latest_state, active_models)
-                yield (
+                yield _run_stream_update(
+                    settings,
                     _live_status_markdown(latest_state.active_models or active_models, progress_messages, mode),
-                    gr.update(value=compare_html, visible=True),
-                    *_history_slot_updates(settings),
+                    compare_html,
+                    latest_state.user_prompt,
+                    clear_prompt=True,
+                    compare_html=compare_html,
+                    chat_id=latest_state.chat_id or state.chat_id or state.run_id,
+                    previous_blocks_html=previous_blocks_html,
+                    run_id=latest_state.run_id,
                 )
 
         final_state = await task
     except Exception as exc:  # noqa: BLE001 - UI must show unexpected orchestration failures.
         latest_state.errors.append(str(exc))
         SQLiteStore(settings).save_run_summary(latest_state, status="failed")
-        yield (
+        yield _run_stream_update(
+            settings,
             _message_panel("Run failed", str(exc)),
-            gr.update(value="", visible=False),
-            *_history_slot_updates(settings),
+            _message_panel("Run failed", str(exc)),
+            latest_state.user_prompt,
+            clear_prompt=True,
+            visible=True,
+            chat_id=latest_state.chat_id or state.chat_id or state.run_id,
+            previous_blocks_html=previous_blocks_html,
+            run_id=latest_state.run_id,
         )
         return
 
     status = _status_markdown(final_state)
     if mode == "normal":
         compare_html = _normal_board_html(settings, final_state, active_models)
-        yield (
+        yield _run_stream_update(
+            settings,
             status,
-            gr.update(value=compare_html, visible=True),
-            *_history_slot_updates(settings),
+            compare_html,
+            final_state.user_prompt,
+            clear_prompt=True,
+            compare_html=compare_html,
+            chat_id=final_state.chat_id or state.chat_id or state.run_id,
+            previous_blocks_html=previous_blocks_html,
+            run_id=final_state.run_id,
         )
         return
 
     compare_html = _observable_board_html(settings, final_state, progress_messages, active_models)
-    final_html = _final_answer_html(final_state.final_answer)
-    yield (
+    final_html = _final_answer_html(final_state.final_answer) if final_state.final_answer else ""
+    yield _run_stream_update(
+        settings,
         status,
-        gr.update(value=_debate_switcher_html(compare_html, final_html, final_state.run_id), visible=True),
+        compare_html,
+        final_state.user_prompt,
+        clear_prompt=True,
+        toggle_visible=bool(final_state.final_answer),
+        compare_html=compare_html,
+        final_html=final_html,
+        chat_id=final_state.chat_id or state.chat_id or state.run_id,
+        previous_blocks_html=previous_blocks_html,
+        run_id=final_state.run_id,
+    )
+
+
+def _run_stream_update(
+    settings: dict,
+    status_html: str,
+    body_html: str,
+    submitted_prompt: str,
+    *,
+    clear_prompt: bool,
+    toggle_visible: bool = False,
+    compare_html: str = "",
+    final_html: str = "",
+    visible: bool = True,
+    chat_id: str = "",
+    previous_blocks_html: str = "",
+    run_id: str = "",
+) -> tuple[Any, ...]:
+    compare_view_html = _chat_transcript_html(
+        previous_blocks_html
+        + _run_block_html(
+            submitted_prompt,
+            compare_html,
+            final_html=final_html,
+            run_id=run_id,
+        )
+    )
+    return (
+        status_html,
+        gr.update(value=compare_view_html, visible=visible and bool(body_html)),
+        gr.update(value="") if clear_prompt else gr.update(),
+        gr.update(value="final", visible=False),
+        "compare",
+        compare_view_html,
+        "",
+        submitted_prompt,
+        chat_id,
         *_history_slot_updates(settings),
     )
 
@@ -652,6 +942,90 @@ def _history_status_html(run: dict[str, Any]) -> str:
         f'{_stat_card("Created", run.get("created_at") or "unknown")}'
         "</div>"
     )
+
+
+def _chat_status_html(detail: dict[str, Any]) -> str:
+    chat = detail["chat"]
+    runs = detail.get("runs", [])
+    latest_run = runs[-1]["run"] if runs else {}
+    return (
+        '<div class="status-grid">'
+        f'{_stat_card("Loaded Chat", chat.get("title") or "Saved chat")}'
+        f'{_stat_card("Runs", str(len(runs)))}'
+        f'{_stat_card("Latest Mode", (latest_run.get("mode") or "normal").title())}'
+        f'{_stat_card("Updated", chat.get("updated_at") or "unknown")}'
+        "</div>"
+    )
+
+
+def _chat_transcript_views(settings: dict, detail: dict[str, Any]) -> tuple[str, str, bool, str]:
+    runs = detail.get("runs", [])
+    submitted_prompt = ""
+    if runs:
+        latest_state = SQLiteStore(settings).state_from_detail(runs[-1])
+        submitted_prompt = latest_state.user_prompt
+
+    compare_html = _chat_transcript_html(_chat_run_blocks_html(settings, detail))
+    return compare_html, "", False, submitted_prompt
+
+
+def _chat_run_blocks_html(
+    settings: dict,
+    detail: dict[str, Any],
+) -> str:
+    store = SQLiteStore(settings)
+    blocks = []
+    for run_detail in detail.get("runs", []):
+        state = store.state_from_detail(run_detail)
+        selected_models = state.active_models or list(MODEL_ORDER)
+        body_html = _run_body_html(settings, state, selected_models, view="compare")
+        final_html = (
+            _run_body_html(settings, state, selected_models, view="final")
+            if state.mode == "debate" and state.final_answer
+            else ""
+        )
+        blocks.append(
+            _run_block_html(
+                state.user_prompt,
+                body_html,
+                final_html=final_html,
+                run_id=state.run_id,
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _run_body_html(
+    settings: dict,
+    state: DebateState,
+    selected_models: list[str],
+    *,
+    view: str = "compare",
+    progress_messages: list[str] | None = None,
+) -> str:
+    if state.mode == "debate":
+        if view == "final" and state.final_answer:
+            return _final_answer_html(state.final_answer)
+        return _observable_board_html(settings, state, progress_messages or [], selected_models)
+    return _normal_board_html(settings, state, selected_models)
+
+
+def _run_block_html(prompt: str | None, body_html: str, *, final_html: str = "", run_id: str = "") -> str:
+    if final_html:
+        toggle_id = f"run-view-toggle-{re.sub(r'[^a-zA-Z0-9_-]', '', run_id or prompt or 'run')}"
+        return (
+            '<section class="chat-run-block run-view-switcher">'
+            f'<input id="{html.escape(toggle_id)}" class="run-view-checkbox" type="checkbox">'
+            f'{_prompt_row_html(prompt, toggle_id=toggle_id)}'
+            f'<div class="run-compare-view">{body_html}</div>'
+            f'<div class="run-final-view">{final_html}</div>'
+            "</section>"
+        )
+    return f'<section class="chat-run-block">{_with_prompt_bubble(prompt, body_html)}</section>'
+
+
+def _chat_transcript_html(blocks_html: str) -> str:
+    return f'<section class="chat-transcript">{blocks_html}</section>' if blocks_html else ""
 
 
 def _history_summary_html(detail: dict[str, Any]) -> str:
@@ -954,18 +1328,29 @@ def _final_answer_html(answer: str | None) -> str:
     )
 
 
-def _debate_switcher_html(compare_html: str, final_html: str, run_id: str) -> str:
-    toggle_id = f"debate-view-toggle-{re.sub(r'[^a-zA-Z0-9_-]', '', run_id)}"
-    return (
-        '<section class="debate-switcher">'
-        f'<input id="{html.escape(toggle_id)}" class="debate-view-checkbox" type="checkbox">'
-        f'<div class="debate-compare-view">{compare_html}</div>'
-        f'<div class="debate-final-view">{final_html}</div>'
-        f'<label for="{html.escape(toggle_id)}" class="debate-view-toggle">'
-        '<span class="toggle-final-label">final</span>'
-        '<span class="toggle-compare-label">compare</span>'
+def _with_prompt_bubble(prompt: str | None, body_html: str) -> str:
+    return f'<section class="output-frame">{_prompt_row_html(prompt)}{body_html}</section>'
+
+
+def _prompt_row_html(prompt: str | None, *, toggle_id: str | None = None) -> str:
+    prompt_text = " ".join((prompt or "").split())
+    if not prompt_text:
+        return ""
+
+    toggle_html = (
+        f'<label for="{html.escape(toggle_id)}" class="run-view-toggle">'
+        '<span class="run-final-label">final</span>'
+        '<span class="run-compare-label">compare</span>'
         "</label>"
-        "</section>"
+        if toggle_id
+        else ""
+    )
+    row_class = "submitted-prompt-row has-run-toggle" if toggle_id else "submitted-prompt-row"
+    return (
+        f'<div class="{row_class}">'
+        f"{toggle_html}"
+        f'<div class="submitted-prompt-bubble">{html.escape(prompt_text)}</div>'
+        "</div>"
     )
 
 
@@ -1006,6 +1391,8 @@ def _welcome_markdown() -> str:
 
 
 def _custom_css() -> str:
+    delete_icon = _asset_data_uri("data/icons/delete_icon.png")
+    delete_icon_url = f'url("{delete_icon}")' if delete_icon else "none"
     return """
 :root {
     --cai-bg: #000000;
@@ -1223,6 +1610,51 @@ footer { display: none !important; visibility: hidden !important; }
     gap: 3px !important;
     scrollbar-color: #383838 #0f0f0f;
 }
+.history-row {
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    margin: 0 !important;
+    padding: 0 4px 0 0 !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 9px !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+}
+.history-row > .wrap,
+.history-row > [class*="wrap"],
+.history-row > div {
+    display: flex !important;
+    align-items: center !important;
+    gap: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    flex-wrap: nowrap !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+.history-row > div:has(.history-item) {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+}
+.history-row > div:has(.history-delete) {
+    position: absolute !important;
+    top: 5px !important;
+    right: 5px !important;
+    z-index: 3 !important;
+    flex: 0 0 24px !important;
+    width: 24px !important;
+    min-width: 24px !important;
+}
 .history-list .history-item,
 .history-list .history-item button,
 .history-item,
@@ -1233,8 +1665,8 @@ footer { display: none !important; visibility: hidden !important; }
     width: 100% !important;
     min-height: 34px !important;
     margin: 0 !important;
-    padding: 0 10px !important;
-    border-radius: 9px !important;
+    padding: 0 36px 0 10px !important;
+    border-radius: 0 !important;
     color: #d9d9d9 !important;
     background: transparent !important;
     border: 1px solid transparent !important;
@@ -1246,11 +1678,56 @@ footer { display: none !important; visibility: hidden !important; }
     cursor: pointer !important;
     flex-shrink: 0 !important;
 }
+.history-row .history-item,
+.history-row .history-item button {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+}
+.history-delete,
+.history-delete button {
+    position: absolute !important;
+    top: 5px !important;
+    right: 5px !important;
+    z-index: 4 !important;
+    flex: 0 0 24px !important;
+    width: 24px !important;
+    min-width: 24px !important;
+    max-width: 24px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 6px !important;
+    color: transparent !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    font-size: 0 !important;
+    font-weight: 750 !important;
+    line-height: 1 !important;
+    background-image: __DELETE_ICON_URL__ !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+    background-size: 14px 14px !important;
+    opacity: 0.62 !important;
+}
+.history-delete:hover,
+.history-delete button:hover {
+    color: transparent !important;
+    background-color: #2a1717 !important;
+    border-color: #4a2525 !important;
+    opacity: 1 !important;
+}
+.history-row:hover,
+.history-row:has(.history-item:hover),
+.history-row:has(.history-delete:hover) {
+    background: #1c1c1c !important;
+}
 .history-list .history-item:hover,
 .history-list .history-item:hover button,
 .history-item:hover,
 .history-item:hover button {
-    background: #1c1c1c !important;
+    background: transparent !important;
 }
 .history-item-active {
     color: var(--cai-text) !important;
@@ -1374,6 +1851,91 @@ footer { display: none !important; visibility: hidden !important; }
     border: 0 !important;
     box-shadow: none !important;
     color: var(--cai-text) !important;
+}
+.output-frame {
+    width: 100%;
+}
+.chat-transcript {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 34px;
+}
+.chat-run-block {
+    width: 100%;
+}
+.chat-run-block + .chat-run-block {
+    padding-top: 30px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.submitted-prompt-row {
+    width: min(100%, 1540px);
+    margin: 0 auto 18px;
+    display: flex;
+    justify-content: flex-end;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.submitted-prompt-row.has-run-toggle {
+    gap: 0;
+    align-items: stretch;
+}
+.submitted-prompt-bubble {
+    max-width: min(620px, 72%);
+    padding: 12px 18px;
+    color: #f0f0f0;
+    background: #242424;
+    border: 1px solid #383838;
+    border-radius: 24px;
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+}
+.has-run-toggle .submitted-prompt-bubble {
+    border-left: 0;
+    border-radius: 0 24px 24px 0;
+}
+.run-view-checkbox {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.run-view-checkbox:not(:checked) ~ .run-final-view,
+.run-view-checkbox:not(:checked) ~ .submitted-prompt-row .run-compare-label,
+.run-view-checkbox:checked ~ .run-compare-view,
+.run-view-checkbox:checked ~ .submitted-prompt-row .run-final-label {
+    display: none !important;
+}
+.run-view-toggle {
+    min-width: 92px;
+    min-height: 50px;
+    padding: 0 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #111111 !important;
+    background: #f4f4f5;
+    border: 1px solid #f4f4f5;
+    border-radius: 999px 0 0 999px;
+    font-size: 17px;
+    font-weight: 750;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+}
+.run-view-toggle *,
+.run-view-toggle span {
+    color: #111111 !important;
+}
+.run-view-toggle:hover {
+    background: #ffffff;
+    border-color: #ffffff;
 }
 .history-loaded-summary {
     color: var(--cai-text);
@@ -1818,6 +2380,7 @@ details > *:not(summary) {
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45) !important;
 }
 .composer-icon-button,
+.prompt-view-toggle,
 .execute-button {
     flex: 0 0 auto !important;
 }
@@ -1840,6 +2403,30 @@ details > *:not(summary) {
 .composer-icon-button button:hover {
     background: #303030 !important;
     border-color: #474747 !important;
+}
+.prompt-view-toggle,
+.prompt-view-toggle button {
+    min-width: 74px !important;
+    width: auto !important;
+    height: 40px !important;
+    min-height: 40px !important;
+    padding: 0 18px !important;
+    border-radius: 999px !important;
+    background: #f4f4f5 !important;
+    border: 1px solid #f4f4f5 !important;
+    color: #111111 !important;
+    font-size: 15px !important;
+    font-weight: 750 !important;
+    line-height: 1 !important;
+}
+.prompt-view-toggle *,
+.prompt-view-toggle span {
+    color: #111111 !important;
+}
+.prompt-view-toggle:hover,
+.prompt-view-toggle button:hover {
+    background: #ffffff !important;
+    border-color: #ffffff !important;
 }
 .execute-button,
 .execute-button button,
@@ -1900,50 +2487,6 @@ button.primary.execute-button * {
     line-height: 1.2;
     text-align: center;
     margin: 6px 0 0;
-}
-.debate-switcher {
-    width: 100%;
-}
-.debate-view-checkbox {
-    position: fixed;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-}
-.debate-view-checkbox:not(:checked) ~ .debate-final-view,
-.debate-view-checkbox:not(:checked) ~ .debate-view-toggle .toggle-compare-label,
-.debate-view-checkbox:checked ~ .debate-compare-view,
-.debate-view-checkbox:checked ~ .debate-view-toggle .toggle-final-label {
-    display: none !important;
-}
-.debate-view-toggle {
-    position: fixed !important;
-    left: calc(var(--history-sidebar-width) + 22px) !important;
-    bottom: 92px !important;
-    z-index: 80 !important;
-    min-width: 88px !important;
-    width: 88px !important;
-    height: 42px !important;
-    min-height: 42px !important;
-    border-radius: 999px !important;
-    color: #111111 !important;
-    background: #f4f4f5 !important;
-    border: 1px solid #f4f4f5 !important;
-    font-size: 14px !important;
-    font-weight: 750 !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    cursor: pointer !important;
-    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45) !important;
-}
-.debate-view-toggle * {
-    color: #111111 !important;
-}
-.debate-view-toggle:hover {
-    background: #ffffff !important;
-    border-color: #ffffff !important;
 }
 
 .options-drawer {
@@ -2120,6 +2663,32 @@ button.primary.execute-button * {
         min-height: 56px;
         border-radius: 26px !important;
     }
+    .submitted-prompt-row {
+        margin-bottom: 14px;
+    }
+    .submitted-prompt-bubble {
+        max-width: 86%;
+        padding: 10px 14px;
+        font-size: 14px;
+        border-radius: 20px;
+    }
+    .has-run-toggle .submitted-prompt-bubble {
+        border-radius: 0 20px 20px 0;
+    }
+    .run-view-toggle {
+        min-width: 72px;
+        min-height: 42px;
+        padding: 0 14px;
+        font-size: 14px;
+    }
+    .prompt-view-toggle,
+    .prompt-view-toggle button {
+        min-width: 62px !important;
+        height: 38px !important;
+        min-height: 38px !important;
+        padding: 0 12px !important;
+        font-size: 13px !important;
+    }
     .execute-button,
     .execute-button button {
         min-width: 50px !important;
@@ -2129,17 +2698,19 @@ button.primary.execute-button * {
         content: "Run";
         font-size: 14px;
     }
-    .debate-view-toggle {
-        left: calc(var(--history-sidebar-width) + 12px) !important;
-        bottom: 142px !important;
-        width: 76px !important;
-        min-width: 76px !important;
-        height: 38px !important;
-        min-height: 38px !important;
-    }
     .connection-list,
     .status-grid {
         grid-template-columns: 1fr;
     }
 }
-"""
+""".replace("__DELETE_ICON_URL__", delete_icon_url)
+
+
+def _asset_data_uri(relative_path: str) -> str:
+    path = Path(relative_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[2] / path
+    if not path.exists():
+        return ""
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"

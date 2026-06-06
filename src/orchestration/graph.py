@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - direct fallback remains usable for dia
 
 class DebateGraphState(TypedDict, total=False):
     run_id: str
+    chat_id: str | None
     created_at: str
     user_prompt: str
     mode: str
