@@ -178,6 +178,15 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
 
         with gr.Row(elem_classes=["council-layout"]):
             with gr.Column(scale=0, min_width=0, elem_classes=["history-sidebar"]):
+                gr.HTML(
+                    """
+                    <div class="history-sidebar-head">
+                        <div class="history-sidebar-logo" aria-label="CouncilAI"></div>
+                        <span>CouncilAI</span>
+                    </div>
+                    """,
+                    elem_classes=["history-sidebar-top"],
+                )
                 new_chat_button = gr.Button("New chat", elem_classes=["history-new-chat"])
                 with gr.Column(min_width=0, elem_classes=["history-list"]):
                     for index in range(HISTORY_LIMIT):
@@ -209,19 +218,6 @@ def build_app(settings: dict) -> tuple[gr.Blocks, Any, str]:
                             )
 
             with gr.Column(elem_classes=["main-chat-area"]):
-                with gr.Row(elem_classes=["topbar"]):
-                    gr.HTML(
-                        f"""
-                        <div class="brand">
-                            <div class="brand-mark"></div>
-                            <div>
-                                <h1>{html.escape(app_name)}</h1>
-                                <p>Multi-model debate assistant</p>
-                            </div>
-                        </div>
-                        """
-                    )
-
                 with gr.Column(elem_classes=["answer-shell"]):
                     observable_box = gr.HTML(
                         value="",
@@ -567,31 +563,46 @@ def _sidebar_state_style(is_open: bool) -> str:
         return """
 <style>
 :root { --history-sidebar-width: 260px; }
-.sidebar-toggle-button { left: calc(var(--history-sidebar-width) + 18px) !important; }
-.topbar .brand { padding-left: 52px !important; }
+.sidebar-toggle-button { left: calc(var(--history-sidebar-width) - 50px) !important; }
 @media (max-width: 760px) {
     :root { --history-sidebar-width: 220px; }
-    .sidebar-toggle-button { left: calc(var(--history-sidebar-width) + 12px) !important; }
+    .sidebar-toggle-button { left: calc(var(--history-sidebar-width) - 48px) !important; }
 }
 </style>
 """
 
     return """
 <style>
-:root { --history-sidebar-width: 0px; }
+:root { --history-sidebar-width: 56px; }
 .history-sidebar {
-    transform: translateX(-110%) !important;
+    transform: none !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    padding: 10px 8px !important;
+    overflow: hidden !important;
+}
+.history-sidebar-head,
+.history-new-chat,
+.history-list {
     opacity: 0 !important;
     pointer-events: none !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    border-right: 0 !important;
+    visibility: hidden !important;
 }
-.sidebar-toggle-button { left: 18px !important; }
-.topbar .brand { padding-left: 52px !important; }
+.sidebar-toggle-button,
+.sidebar-toggle-button button {
+    left: 8px !important;
+    background-image: var(--cai-logo-image) !important;
+    background-size: 28px 28px !important;
+}
+.sidebar-toggle-button:hover,
+.sidebar-toggle-button:hover button,
+.sidebar-toggle-button button:hover {
+    background-image: var(--cai-sidebar-icon-image) !important;
+    background-size: 22px 22px !important;
+}
 @media (max-width: 760px) {
-    :root { --history-sidebar-width: 0px; }
-    .sidebar-toggle-button { left: 12px !important; }
+    :root { --history-sidebar-width: 52px; }
+    .sidebar-toggle-button { left: 6px !important; }
 }
 </style>
 """
@@ -1132,7 +1143,7 @@ def _model_column_html(
     return (
         f'<article class="debate-column {status_class}" style="--model-accent: {accent};">'
         '<div class="debate-model-header">'
-        f'<div class="model-orb">{html.escape(label[:1])}</div>'
+        f'<div class="model-orb model-orb-{html.escape(model_key)}"><span>{html.escape(label[:1])}</span></div>'
         '<div>'
         f'<h3>{html.escape(label)}</h3>'
         f'<p>{html.escape(_model_role(settings, model_key))}</p>'
@@ -1392,7 +1403,19 @@ def _welcome_markdown() -> str:
 
 def _custom_css() -> str:
     delete_icon = _asset_data_uri("data/icons/delete_icon.png")
+    council_logo = _asset_data_uri("data/icons/CouncilAI_logo.png")
+    sidebar_icon = _asset_data_uri("data/icons/sidebar_icon.png")
+    plus_icon = _asset_data_uri("data/icons/plus_icon.png")
+    chatgpt_icon = _asset_data_uri("data/icons/chatgpt_icon.png")
+    gemini_icon = _asset_data_uri("data/icons/gemini_icon.png")
+    claude_icon = _asset_data_uri("data/icons/claude_icon.png")
     delete_icon_url = f'url("{delete_icon}")' if delete_icon else "none"
+    council_logo_url = f'url("{council_logo}")' if council_logo else "none"
+    sidebar_icon_url = f'url("{sidebar_icon}")' if sidebar_icon else "none"
+    plus_icon_url = f'url("{plus_icon}")' if plus_icon else "none"
+    chatgpt_icon_url = f'url("{chatgpt_icon}")' if chatgpt_icon else "none"
+    gemini_icon_url = f'url("{gemini_icon}")' if gemini_icon else "none"
+    claude_icon_url = f'url("{claude_icon}")' if claude_icon else "none"
     return """
 :root {
     --cai-bg: #000000;
@@ -1403,12 +1426,22 @@ def _custom_css() -> str:
     --cai-muted: #a3a3a3;
     --cai-line: #2f2f2f;
     --cai-line-strong: #4a4a4a;
+    --cai-accent: #f4f4f5;
+    --cai-accent-soft: rgba(244, 244, 245, 0.10);
+    --cai-card-bg: rgba(22, 22, 22, 0.88);
+    --cai-card-border: rgba(255, 255, 255, 0.10);
     --cai-button: #ffffff;
     --cai-button-text: #111111;
     --cai-warn-bg: #2d2012;
     --cai-warn-line: #7c4a16;
     --cai-warn-text: #fed7aa;
-    --cai-topbar-height: 96px;
+    --cai-logo-image: __COUNCIL_LOGO_URL__;
+    --cai-sidebar-icon-image: __SIDEBAR_ICON_URL__;
+    --cai-plus-icon-image: __PLUS_ICON_URL__;
+    --cai-chatgpt-icon-image: __CHATGPT_ICON_URL__;
+    --cai-gemini-icon-image: __GEMINI_ICON_URL__;
+    --cai-claude-icon-image: __CLAUDE_ICON_URL__;
+    --cai-topbar-height: 0px;
     --cai-composer-height: 138px;
     --history-sidebar-width: 260px;
 }
@@ -2640,9 +2673,233 @@ button.primary.execute-button * {
     color: var(--cai-warn-text) !important;
 }
 
+/* --- Modern smooth UI refresh --- */
+.topbar {
+    display: none !important;
+}
+.answer-shell {
+    top: 0 !important;
+    padding-top: 22px !important;
+}
+.history-sidebar {
+    padding: 16px 12px !important;
+    background:
+        linear-gradient(180deg, rgba(20, 20, 20, 0.98), rgba(12, 12, 12, 0.98)),
+        #101010 !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03) !important;
+}
+.history-sidebar > .wrap,
+.history-sidebar > .column-wrap,
+.history-sidebar > [class*="wrap"] {
+    height: 100% !important;
+    min-height: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: flex-start !important;
+    gap: 0 !important;
+    overflow: hidden !important;
+}
+.history-sidebar-top,
+.history-sidebar-top > .wrap,
+.history-sidebar-top > [class*="wrap"],
+.history-sidebar .history-new-chat,
+.history-sidebar .history-new-chat > .wrap,
+.history-sidebar .history-new-chat > [class*="wrap"] {
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    min-height: 0 !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+}
+.history-sidebar-head {
+    min-height: 42px !important;
+    margin: 0 48px 8px 2px !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    border: 0 !important;
+}
+.history-sidebar-logo {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    background-image: var(--cai-logo-image);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    border-radius: 10px;
+}
+.history-sidebar-head span {
+    color: var(--cai-text) !important;
+    font-size: 17px !important;
+    font-weight: 760 !important;
+    line-height: 1.15 !important;
+}
+.sidebar-toggle-button,
+.sidebar-toggle-button button {
+    top: 16px !important;
+    color: transparent !important;
+    font-size: 0 !important;
+    background-color: #1a1a1a !important;
+    background-image: var(--cai-sidebar-icon-image) !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+    background-size: 22px 22px !important;
+    border-color: rgba(255, 255, 255, 0.13) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+.history-new-chat,
+.history-new-chat button {
+    min-height: 42px !important;
+    margin: 0 0 8px !important;
+    border-radius: 14px !important;
+    background: rgba(255, 255, 255, 0.055) !important;
+    border: 1px solid rgba(255, 255, 255, 0.11) !important;
+    font-weight: 720 !important;
+    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease !important;
+}
+.history-new-chat:hover,
+.history-new-chat button:hover {
+    background: rgba(255, 255, 255, 0.095) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    transform: translateY(-1px);
+}
+.history-list {
+    margin-top: 2px !important;
+    padding-top: 4px !important;
+}
+.history-row {
+    height: 38px !important;
+    min-height: 38px !important;
+    border-radius: 12px !important;
+    transition: background 140ms ease, border-color 140ms ease !important;
+}
+.history-list .history-item,
+.history-list .history-item button,
+.history-item,
+.history-item button {
+    min-height: 36px !important;
+    padding-left: 12px !important;
+    padding-right: 38px !important;
+    color: rgba(244, 244, 245, 0.82) !important;
+    font-weight: 650 !important;
+}
+.history-row:hover {
+    background: rgba(255, 255, 255, 0.065) !important;
+    border-color: rgba(255, 255, 255, 0.10) !important;
+}
+.history-delete,
+.history-delete button {
+    top: 7px !important;
+    right: 7px !important;
+    opacity: 0.50 !important;
+}
+.history-delete:hover,
+.history-delete button:hover {
+    background-color: rgba(255, 86, 86, 0.14) !important;
+    border-color: rgba(255, 120, 120, 0.22) !important;
+}
+.submitted-prompt-bubble {
+    background: linear-gradient(180deg, #2b2b2b, #242424) !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+    box-shadow: 0 16px 38px rgba(0, 0, 0, 0.30) !important;
+}
+.debate-column {
+    background: linear-gradient(180deg, rgba(25, 25, 25, 0.96), rgba(16, 16, 16, 0.98)) !important;
+    border: 1px solid rgba(255, 255, 255, 0.10) !important;
+    border-top: 2px solid var(--model-accent) !important;
+    border-radius: 20px !important;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+}
+.debate-model-header {
+    padding: 15px 16px !important;
+    background: rgba(255, 255, 255, 0.035) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+.model-orb {
+    color: transparent !important;
+    background-color: rgba(255, 255, 255, 0.08) !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+    background-size: 24px 24px !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+.model-orb span {
+    display: none !important;
+}
+.model-orb-chatgpt { background-image: var(--cai-chatgpt-icon-image) !important; }
+.model-orb-gemini { background-image: var(--cai-gemini-icon-image) !important; }
+.model-orb-claude { background-image: var(--cai-claude-icon-image) !important; }
+.model-status {
+    background: rgba(255, 255, 255, 0.075) !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+}
+.turn-card {
+    background: rgba(255, 255, 255, 0.045) !important;
+    border-color: rgba(255, 255, 255, 0.09) !important;
+    border-radius: 16px !important;
+}
+.turn-meta {
+    background: rgba(255, 255, 255, 0.055) !important;
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+.composer-bar {
+    background: linear-gradient(180deg, rgba(45, 45, 45, 0.94), rgba(34, 34, 34, 0.96)) !important;
+    border: 1px solid rgba(255, 255, 255, 0.13) !important;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+    transition: border-color 160ms ease, box-shadow 160ms ease !important;
+}
+.composer-bar:focus-within {
+    border-color: rgba(255, 255, 255, 0.26) !important;
+    box-shadow: 0 18px 52px rgba(0, 0, 0, 0.55), 0 0 0 3px rgba(244, 244, 245, 0.08) !important;
+}
+.composer-icon-button,
+.composer-icon-button button {
+    color: transparent !important;
+    font-size: 0 !important;
+    background-image: var(--cai-plus-icon-image) !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+    background-size: 18px 18px !important;
+}
+.execute-button,
+.execute-button button {
+    transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease !important;
+}
+.execute-button:hover,
+.execute-button button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 30px rgba(255, 255, 255, 0.14) !important;
+}
+.options-drawer {
+    width: min(100%, 1120px) !important;
+    background: linear-gradient(145deg, rgba(38, 38, 38, 0.92), rgba(18, 18, 18, 0.96)) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 26px !important;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+}
+.drawer-card,
+.drawer-actions,
+.connection-list p,
+.stat-card {
+    background: rgba(255, 255, 255, 0.045) !important;
+    border-color: rgba(255, 255, 255, 0.10) !important;
+    border-radius: 18px !important;
+}
+#council-shell input[type="radio"],
+#council-shell input[type="checkbox"],
+#council-shell input[type="range"] {
+    accent-color: var(--cai-accent) !important;
+}
+
 @media (max-width: 760px) {
     :root {
-        --cai-topbar-height: 96px;
+        --cai-topbar-height: 0px;
         --cai-composer-height: 138px;
         --history-sidebar-width: 220px;
     }
@@ -2703,7 +2960,13 @@ button.primary.execute-button * {
         grid-template-columns: 1fr;
     }
 }
-""".replace("__DELETE_ICON_URL__", delete_icon_url)
+""".replace("__DELETE_ICON_URL__", delete_icon_url).replace(
+        "__COUNCIL_LOGO_URL__", council_logo_url
+    ).replace("__SIDEBAR_ICON_URL__", sidebar_icon_url).replace(
+        "__PLUS_ICON_URL__", plus_icon_url
+    ).replace("__CHATGPT_ICON_URL__", chatgpt_icon_url).replace(
+        "__GEMINI_ICON_URL__", gemini_icon_url
+    ).replace("__CLAUDE_ICON_URL__", claude_icon_url)
 
 
 def _asset_data_uri(relative_path: str) -> str:
