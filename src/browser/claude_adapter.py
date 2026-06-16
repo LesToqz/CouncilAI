@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 import time
 
-from src.browser.base_chat_adapter import BaseChatAdapter
+from src.browser.base_chat_adapter import (
+    BaseChatAdapter,
+    EmptyResponseError,
+    NotLoggedInError,
+    PromptBoxNotFoundError,
+)
 
 
 class ClaudeAdapter(BaseChatAdapter):
@@ -66,15 +71,48 @@ class ClaudeAdapter(BaseChatAdapter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._response_count_before_send: int = 0
+        self._last_submitted_prompt = ""
+        self._last_completed_response = ""
 
     # ── Override send_prompt ─────────────────────────────────────────
     async def send_prompt(self, prompt: str) -> None:
         """Snapshot the current number of assistant-message blocks, then send."""
+        if self.page is None:
+            await self.open()
+        prompt_box = await self._first_visible_locator(self.PROMPT_SELECTORS, timeout_seconds=20)
+        if prompt_box is None:
+            raise PromptBoxNotFoundError(f"{self.model_key}: prompt box not found")
+
+        self._last_submitted_prompt = prompt
+        self._last_completed_response = ""
         self._response_count_before_send = await self._count_assistant_blocks()
-        await super().send_prompt(prompt)
+
+        await prompt_box.click()
+        await self.page.keyboard.press("Control+A")
+        await self.page.keyboard.press("Backspace")
+        await self.page.keyboard.insert_text(prompt)
+        await self._submit_prompt()
+
+    async def _submit_prompt(self) -> None:
+        submit_button = await self._first_enabled_locator(self.SUBMIT_SELECTORS, timeout_seconds=10)
+        if submit_button is not None:
+            await submit_button.click()
+            return
+        await self.page.keyboard.press("Control+Enter")
+        await asyncio.sleep(0.25)
+        await self.page.keyboard.press("Enter")
 
     # ── Override extract_latest_response ─────────────────────────────
     async def extract_latest_response(self) -> str:
+        new_block_text = await self._extract_new_block_response()
+        if new_block_text:
+            return new_block_text
+        reused_text = await self._extract_latest_response_from_any_block()
+        if reused_text:
+            return reused_text
+        return await self._extract_latest_response_from_fallback_selectors()
+
+    async def _extract_new_block_response(self) -> str:
         """Return text only from the newest assistant-message block.
 
         Claude keeps every turn on the same page, so we must avoid
@@ -84,8 +122,8 @@ class ClaudeAdapter(BaseChatAdapter):
         2.  Among those, pick the **last** one whose index is
             >= ``_response_count_before_send`` (i.e. it appeared after
             we submitted the latest prompt).
-        3.  Fall back to the generic ``RESPONSE_SELECTORS`` list for
-            forward-compatibility with DOM changes.
+        3.  Generic fallback selectors are handled after reused assistant
+            blocks have been checked.
         """
         if self.page is None:
             return ""
@@ -101,14 +139,19 @@ class ClaudeAdapter(BaseChatAdapter):
                         if idx < self._response_count_before_send:
                             break  # everything from here is old
                         text = await self._extract_clean_text(all_blocks.nth(idx))
-                        if text:
+                        if self._is_usable_response_text(text):
                             return text
             except Exception:
                 continue
 
-        # ── Fallback: generic RESPONSE_SELECTORS ─────────────────────
+        return ""
+
+    # ── Override wait_for_response_complete ───────────────────────────
+    async def _extract_latest_response_from_fallback_selectors(self) -> str:
+        if self.page is None:
+            return ""
+
         for selector in self.RESPONSE_SELECTORS:
-            # Skip selectors we already tried above.
             if selector in self._ASSISTANT_BLOCK_SELECTORS:
                 continue
             try:
@@ -117,12 +160,71 @@ class ClaudeAdapter(BaseChatAdapter):
             except Exception:
                 continue
             cleaned = [await self._extract_clean_text(locator.nth(idx)) for idx in range(count)]
-            non_empty = [t for t in cleaned if t]
+            non_empty = [text for text in cleaned if self._is_usable_response_text(text)]
             if non_empty:
                 return non_empty[-1]
         return ""
 
-    # ── Override wait_for_response_complete ───────────────────────────
+    async def _extract_latest_response_from_any_block(self) -> str:
+        if self.page is None:
+            return ""
+
+        for selector in self._ASSISTANT_BLOCK_SELECTORS:
+            try:
+                all_blocks = self.page.locator(selector)
+                count = await all_blocks.count()
+            except Exception:
+                continue
+
+            for idx in range(count - 1, -1, -1):
+                text = await self._extract_clean_text(all_blocks.nth(idx))
+                if self._is_usable_response_text(text):
+                    return text
+        return ""
+
+    def _is_usable_response_text(self, text: str) -> bool:
+        return bool(text) and not (
+            self._last_submitted_prompt
+            and self._looks_like_prompt_echo(text, self._last_submitted_prompt)
+        )
+
+    def _new_response_text(self, text: str, previous_response: str | None) -> str:
+        previous = (previous_response or "").strip()
+        current = text.strip()
+        if not previous or not current:
+            return current
+        if current == previous:
+            return ""
+        if current.startswith(previous):
+            return current[len(previous):].strip()
+        return current
+
+    async def ask(self, prompt: str) -> str:
+        is_logged_in = await self.ensure_logged_in()
+        if not is_logged_in:
+            raise NotLoggedInError(f"{self.model_key}: user is not logged in")
+
+        previous_response = await self.extract_latest_response()
+        await self.send_prompt(prompt)
+        await self.wait_for_response_complete(previous_response=previous_response, submitted_prompt=prompt)
+        response = self._last_completed_response or await self.extract_latest_response()
+        if (
+            self._last_completed_response
+            and (
+                not response.strip()
+                or response == previous_response
+                or self._looks_like_prompt_echo(response, prompt)
+            )
+        ):
+            response = self._last_completed_response
+        if not response.strip():
+            raise EmptyResponseError(f"{self.model_key}: empty response")
+        if response == previous_response:
+            raise EmptyResponseError(f"{self.model_key}: latest response is unchanged from the previous turn")
+        if self._looks_like_prompt_echo(response, prompt):
+            raise EmptyResponseError(f"{self.model_key}: latest text is the submitted prompt, not a response")
+        return response
+
     async def wait_for_response_complete(
         self,
         previous_response: str | None = None,
@@ -162,14 +264,26 @@ class ClaudeAdapter(BaseChatAdapter):
                 await asyncio.sleep(poll_interval)
                 continue
 
-            if saw_new and current_text and current_text != (previous_response or ""):
-                if current_text == last_text and current_text.strip():
+            candidate_text = self._new_response_text(current_text, previous_response)
+            if submitted_prompt and self._looks_like_prompt_echo(candidate_text, submitted_prompt):
+                await asyncio.sleep(poll_interval)
+                continue
+
+            # Claude can update an existing assistant container between
+            # follow-up debate turns. Changed stable text is valid even
+            # when the assistant block count is reused.
+            if candidate_text:
+                saw_new = True
+
+            if saw_new and candidate_text:
+                if candidate_text == last_text and candidate_text.strip():
                     stable_count += 1
                 else:
                     stable_count = 0
-                    last_text = current_text
+                    last_text = candidate_text
 
                 if stable_count >= stable_polls_required:
+                    self._last_completed_response = last_text
                     return
 
             await asyncio.sleep(poll_interval)
@@ -190,6 +304,8 @@ class ClaudeAdapter(BaseChatAdapter):
             raise EmptyResponseError(
                 f"{self.model_key}: latest text looks like the submitted prompt, not a response"
             )
+
+        self._last_completed_response = last_text
 
     # ── Private helpers ──────────────────────────────────────────────
     async def _count_assistant_blocks(self) -> int:

@@ -2145,17 +2145,27 @@ details > *:not(summary) { padding: 0 14px 14px; }
     background-color: rgba(255, 255, 255, 0.06) !important;
     background-position: center !important;
     background-repeat: no-repeat !important;
-    background-size: 24px 24px !important;
+    background-size: cover !important;
     border: 1px solid rgba(255, 255, 255, 0.10) !important;
     border-radius: var(--cai-r-pill);
+    overflow: hidden !important;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
     transition: transform var(--cai-duration) var(--cai-ease),
                 box-shadow var(--cai-duration) var(--cai-ease) !important;
 }
 .model-orb span { display: none !important; }
-.model-orb-chatgpt { background-image: var(--cai-chatgpt-icon-image) !important; }
-.model-orb-gemini  { background-image: var(--cai-gemini-icon-image)  !important; }
-.model-orb-claude  { background-image: var(--cai-claude-icon-image)  !important; }
+.model-orb-chatgpt {
+    background-image: var(--cai-chatgpt-icon-image) !important;
+    background-color: #ffffff !important;
+}
+.model-orb-gemini {
+    background-image: var(--cai-gemini-icon-image) !important;
+    background-color: #ffffff !important;
+}
+.model-orb-claude {
+    background-image: var(--cai-claude-icon-image) !important;
+    background-color: #d96f4f !important;
+}
 .debate-column:hover .model-orb {
     transform: scale(1.1);
     box-shadow: 0 0 18px rgba(255,255,255,0.08),
