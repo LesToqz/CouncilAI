@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from src.browser.base_chat_adapter import BaseChatAdapter, EmptyResponseError
+from src.browser.base_chat_adapter import BaseChatAdapter, EmptyResponseError, NotLoggedInError
 
 
 class GeminiAdapter(BaseChatAdapter):
@@ -46,13 +46,20 @@ class GeminiAdapter(BaseChatAdapter):
         super().__init__(*args, **kwargs)
         self._response_count_before_send = 0
         self._response_counts_before_send: dict[str, int] = {}
+        self._last_submitted_prompt = ""
+        self._last_completed_response = ""
 
     async def send_prompt(self, prompt: str) -> None:
+        self._last_submitted_prompt = prompt
+        self._last_completed_response = ""
         self._response_counts_before_send = await self._count_response_blocks_by_selector()
         self._response_count_before_send = max(self._response_counts_before_send.values(), default=0)
         await super().send_prompt(prompt)
 
     async def extract_latest_response(self) -> str:
+        return await self._extract_latest_response(allow_reused_block=True)
+
+    async def _extract_latest_response(self, allow_reused_block: bool) -> str:
         if self.page is None:
             return ""
 
@@ -70,8 +77,39 @@ class GeminiAdapter(BaseChatAdapter):
                 if index < previous_count:
                     break
                 text = await self._extract_clean_text(locator.nth(index))
+                if self._last_submitted_prompt and self._looks_like_prompt_echo(text, self._last_submitted_prompt):
+                    continue
                 if text:
                     return text
+
+        if allow_reused_block:
+            reused_text = await self._extract_latest_response_from_any_block(tried_selectors)
+            if reused_text:
+                return reused_text
+
+        return await self._extract_latest_response_from_fallback_selectors(tried_selectors)
+
+    async def _extract_latest_response_from_any_block(self, tried_selectors: set[str]) -> str:
+        if self.page is None:
+            return ""
+
+        for selector in self.ASSISTANT_BLOCK_SELECTORS:
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+            except Exception:
+                continue
+
+            for index in range(count - 1, -1, -1):
+                text = await self._extract_clean_text(locator.nth(index))
+                if self._is_usable_response_text(text):
+                    return text
+            tried_selectors.add(selector)
+        return ""
+
+    async def _extract_latest_response_from_fallback_selectors(self, tried_selectors: set[str]) -> str:
+        if self.page is None:
+            return ""
 
         for selector in self.RESPONSE_SELECTORS:
             if selector in tried_selectors:
@@ -82,10 +120,49 @@ class GeminiAdapter(BaseChatAdapter):
             except Exception:
                 continue
             cleaned = [await self._extract_clean_text(locator.nth(index)) for index in range(count)]
-            non_empty = [text for text in cleaned if text]
+            non_empty = [
+                text
+                for text in cleaned
+                if text and not (
+                    self._last_submitted_prompt
+                    and self._looks_like_prompt_echo(text, self._last_submitted_prompt)
+                )
+            ]
             if non_empty:
                 return non_empty[-1]
         return ""
+
+    def _is_usable_response_text(self, text: str) -> bool:
+        return bool(text) and not (
+            self._last_submitted_prompt
+            and self._looks_like_prompt_echo(text, self._last_submitted_prompt)
+        )
+
+    async def ask(self, prompt: str) -> str:
+        is_logged_in = await self.ensure_logged_in()
+        if not is_logged_in:
+            raise NotLoggedInError(f"{self.model_key}: user is not logged in")
+
+        previous_response = await self.extract_latest_response()
+        await self.send_prompt(prompt)
+        await self.wait_for_response_complete(previous_response=previous_response, submitted_prompt=prompt)
+        response = await self.extract_latest_response()
+        if (
+            self._last_completed_response
+            and (
+                not response.strip()
+                or response == previous_response
+                or self._looks_like_prompt_echo(response, prompt)
+            )
+        ):
+            response = self._last_completed_response
+        if not response.strip():
+            raise EmptyResponseError(f"{self.model_key}: empty response")
+        if response == previous_response:
+            raise EmptyResponseError(f"{self.model_key}: latest response is unchanged from the previous turn")
+        if self._looks_like_prompt_echo(response, prompt):
+            raise EmptyResponseError(f"{self.model_key}: latest text is the submitted prompt, not a response")
+        return response
 
     async def _count_model_responses(self) -> int:
         counts = await self._count_response_blocks_by_selector()
@@ -166,6 +243,7 @@ class GeminiAdapter(BaseChatAdapter):
                     last_text = current_text
 
                 if stable_count >= stable_polls_required and not await self._has_active_response_indicator():
+                    self._last_completed_response = last_text
                     return
 
             await asyncio.sleep(poll_interval)
@@ -175,3 +253,5 @@ class GeminiAdapter(BaseChatAdapter):
 
         if submitted_prompt and self._looks_like_prompt_echo(last_text, submitted_prompt):
             raise EmptyResponseError(f"{self.model_key}: latest text looks like the submitted prompt, not a response")
+
+        self._last_completed_response = last_text

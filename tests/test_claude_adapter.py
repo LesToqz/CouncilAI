@@ -1,6 +1,6 @@
 import asyncio
 
-from src.browser.gemini_adapter import GeminiAdapter
+from src.browser.claude_adapter import ClaudeAdapter
 
 
 class FakeElement:
@@ -33,11 +33,11 @@ class FakePage:
         return FakeLocator(self.selector_texts.get(selector, []))
 
 
-class FakeGeminiAdapter(GeminiAdapter):
+class FakeClaudeAdapter(ClaudeAdapter):
     def __init__(self, responses: list[str], counts: list[int]) -> None:
         super().__init__(
-            model_key="gemini",
-            site={"url": "https://gemini.google.com"},
+            model_key="claude",
+            site={"url": "https://claude.ai"},
             context=None,
             settings={
                 "browser": {
@@ -57,16 +57,16 @@ class FakeGeminiAdapter(GeminiAdapter):
         self.response_index += 1
         return value
 
-    async def _count_model_responses(self) -> int:
+    async def _count_assistant_blocks(self) -> int:
         value = self.counts[min(self.count_index, len(self.counts) - 1)]
         self.count_index += 1
         return value
 
-    async def _has_active_response_indicator(self) -> bool:
-        return False
+    async def _wait_while_stop_button_visible(self) -> None:
+        return None
 
 
-class FakeAskGeminiAdapter(FakeGeminiAdapter):
+class FakeAskClaudeAdapter(FakeClaudeAdapter):
     async def ensure_logged_in(self) -> bool:
         return True
 
@@ -75,9 +75,9 @@ class FakeAskGeminiAdapter(FakeGeminiAdapter):
         self._last_completed_response = ""
 
 
-def test_gemini_wait_accepts_changed_text_when_response_count_is_reused() -> None:
-    adapter = FakeGeminiAdapter(
-        responses=["old answer", "new answer", "new answer", "new answer"],
+def test_claude_wait_accepts_changed_text_when_response_count_is_reused() -> None:
+    adapter = FakeClaudeAdapter(
+        responses=["old answer", "new critique", "new critique", "new critique"],
         counts=[1, 1, 1, 1],
     )
     adapter._response_count_before_send = 1
@@ -85,33 +85,50 @@ def test_gemini_wait_accepts_changed_text_when_response_count_is_reused() -> Non
     asyncio.run(adapter.wait_for_response_complete(previous_response="old answer"))
 
 
-def test_gemini_ask_uses_stable_response_when_final_extract_is_prompt_echo() -> None:
-    adapter = FakeAskGeminiAdapter(
+def test_claude_wait_caches_only_new_suffix_when_container_combines_turns() -> None:
+    adapter = FakeClaudeAdapter(
         responses=[
             "old answer",
-            "new answer",
-            "new answer",
-            "new answer",
-            "summarize the result",
+            "old answer\n\nnew critique",
+            "old answer\n\nnew critique",
+            "old answer\n\nnew critique",
+        ],
+        counts=[1, 1, 1, 1],
+    )
+    adapter._response_count_before_send = 1
+
+    asyncio.run(adapter.wait_for_response_complete(previous_response="old answer"))
+
+    assert adapter._last_completed_response == "new critique"
+
+
+def test_claude_ask_uses_stable_response_when_final_extract_is_prompt_echo() -> None:
+    adapter = FakeAskClaudeAdapter(
+        responses=[
+            "old answer",
+            "new critique",
+            "new critique",
+            "new critique",
+            "critique this answer",
         ],
         counts=[1, 1, 1, 1, 1],
     )
     adapter._response_count_before_send = 1
 
-    response = asyncio.run(adapter.ask("summarize the result"))
+    response = asyncio.run(adapter.ask("critique this answer"))
 
-    assert response == "new answer"
+    assert response == "new critique"
 
 
-def test_gemini_extract_accepts_reused_response_block() -> None:
-    adapter = GeminiAdapter(
-        model_key="gemini",
-        site={"url": "https://gemini.google.com"},
+def test_claude_extract_accepts_reused_response_block() -> None:
+    adapter = ClaudeAdapter(
+        model_key="claude",
+        site={"url": "https://claude.ai"},
         context=None,
         settings={},
-        page=FakePage({"model-response": ["new critique answer"]}),
+        page=FakePage({"[data-message-role='assistant']": ["new critique answer"]}),
     )
-    adapter._response_counts_before_send = {"model-response": 1}
+    adapter._response_count_before_send = 1
     adapter._last_submitted_prompt = "critique this answer"
 
     response = asyncio.run(adapter.extract_latest_response())
@@ -119,15 +136,15 @@ def test_gemini_extract_accepts_reused_response_block() -> None:
     assert response == "new critique answer"
 
 
-def test_gemini_extract_rejects_reused_prompt_echo() -> None:
-    adapter = GeminiAdapter(
-        model_key="gemini",
-        site={"url": "https://gemini.google.com"},
+def test_claude_extract_rejects_reused_prompt_echo() -> None:
+    adapter = ClaudeAdapter(
+        model_key="claude",
+        site={"url": "https://claude.ai"},
         context=None,
         settings={},
-        page=FakePage({"model-response": ["critique this answer"]}),
+        page=FakePage({"[data-message-role='assistant']": ["critique this answer"]}),
     )
-    adapter._response_counts_before_send = {"model-response": 1}
+    adapter._response_count_before_send = 1
     adapter._last_submitted_prompt = "critique this answer"
 
     response = asyncio.run(adapter.extract_latest_response())
