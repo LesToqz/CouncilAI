@@ -3,7 +3,7 @@ from src.utils.config_loader import load_settings
 from src.utils.edge_launcher import launch_controlled_edge
 
 
-APP_VERSION_LABEL = "CouncilAI v2"
+APP_VERSION_LABEL = "CouncilAI v1"
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# CouncilAI v2
+# CouncilAI v1
 
 CouncilAI is a local multi-LLM debate assistant. It attaches to ChatGPT, Gemini, and Claude tabs in a controllable Microsoft Edge window, sends prompts through their consumer chat UIs, lets the models critique and refine each other, and returns a final synthesized answer.
 
@@ -55,7 +55,7 @@ Start the app:
 Expected terminal startup output:
 
 ```text
-CouncilAI v2
+CouncilAI v1
 
 * Running on local URL:  http://127.0.0.1:7860
 * To create a public link, set `share=True` in `launch()`.
